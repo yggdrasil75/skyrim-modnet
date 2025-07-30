@@ -540,7 +540,7 @@ if __name__ == '__main__':
     
     # Get initial nodes from tracker
     tracker_nodes = netConfig.get_nodes_from_tracker()
-    for node_id, node_address in tracker_nodes.items():
+    for node_id, node_address in tracker_nodes:
         if node_id != NODE_ID and node_id not in PEERS:
             PEERS[node_id] = node_address
             Config.add_peer(node_id, node_address)
@@ -571,7 +571,7 @@ if __name__ == '__main__':
                 PEERS.update(known_peers_data)
         except requests.exceptions.RequestException as e:
             print(f"TCP bootstrap failed: {e}")
-            
+
     # Start maintenance threads
     threading.Thread(target=peer_discovery_loop, daemon=True).start()
     threading.Thread(target=peer_health_check_loop, daemon=True).start()

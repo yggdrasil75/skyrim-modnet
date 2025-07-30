@@ -179,4 +179,4 @@ class NetworkConfig:
                     return response.json()
             except requests.exceptions.RequestException as e:
                 print(f"Failed to contact tracker at {tracker_addr}:{tracker_port}: {e}")
-        return []
+        return {}
