@@ -290,6 +290,60 @@ def send_data_udp(peer_address, key, content):
         print(f"UDP data transfer failed: {e}")
         return False
 
+def discover_local_peers():
+    """Discover peers on the local network using UDP broadcast/multicast"""
+    # Use a well-known multicast address and port for discovery
+    MULTICAST_GROUP = '224.1.1.1'
+    MULTICAST_PORT = 5007
+    DISCOVERY_INTERVAL = 300  # 5 minutes between discovery attempts
+    
+    # Create a UDP socket
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+    
+    # Set socket options for multicast
+    sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    
+    # Bind to the discovery port
+    sock.bind(('0.0.0.0', MULTICAST_PORT))
+    
+    # Add socket to multicast group
+    mreq = socket.inet_aton(MULTICAST_GROUP) + socket.inet_aton('0.0.0.0')
+    sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+    
+    # Set socket timeout to prevent blocking forever
+    sock.settimeout(5.0)
+    
+    while True:
+        try:
+            # Send discovery message periodically
+            message = f"DISCOVERY|{NODE_ID}|{NODE_HOST}:{NODE_PORT}"
+            sock.sendto(message.encode(), (MULTICAST_GROUP, MULTICAST_PORT))
+            
+            # Listen for responses
+            while True:
+                try:
+                    data, addr = sock.recvfrom(1024)
+                    message = data.decode()
+                    if message.startswith("DISCOVERY|"):
+                        parts = message.split('|')
+                        if len(parts) >= 3:
+                            peer_id = parts[1]
+                            peer_address = parts[2]
+                            
+                            # Don't add self
+                            if peer_id != NODE_ID and peer_id not in PEERS:
+                                PEERS[peer_id] = peer_address
+                                Config.add_peer(peer_id, peer_address)
+                                print(f"[{NODE_PORT}] Discovered local peer: {peer_id} at {peer_address}")
+                except socket.timeout:
+                    break
+                    
+        except Exception as e:
+            print(f"Local discovery error: {e}")
+        
+        # Wait before next discovery attempt
+        time.sleep(DISCOVERY_INTERVAL)
 
 # --- Web UI Endpoints ---
 
@@ -513,6 +567,7 @@ if __name__ == '__main__':
     # Start maintenance threads
     threading.Thread(target=peer_discovery_loop, daemon=True).start()
     threading.Thread(target=peer_health_check_loop, daemon=True).start()
+    threading.Thread(target=discover_local_peers, daemon=True).start()
     
     # Keep main thread alive
     while True:
