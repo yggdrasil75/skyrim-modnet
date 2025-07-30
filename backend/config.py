@@ -5,11 +5,14 @@ import struct
 import time
 from collections import defaultdict
 
+import requests
+
 class NodeConfig:
     def __init__(self, node_id, config_path='node_config.json'):
         self.node_id = node_id
         self.config_path = config_path
         self.config = self._load_config()
+        self.save_config()
         
     def _load_config(self):
         """Load configuration from file or create default if doesn't exist"""
@@ -127,6 +130,9 @@ class NetworkConfig:
             ('stun1.l.google.com', 19302),
             ('stun2.l.google.com', 19302)
         ]
+        self.trackers = [
+            ('45.79.195.214', 5000)  # Added dedicated tracker
+        ]
         self.public_udp_addr = None
         self.local_udp_port = None
         self.local_tcp_port = None
@@ -163,3 +169,14 @@ class NetworkConfig:
         except Exception as e:
             print(f"STUN error: {e}")
             return "Unknown"
+        
+    def get_nodes_from_tracker(self):
+        """Request list of nodes from the tracker"""
+        for tracker_addr, tracker_port in self.trackers:
+            try:
+                response = requests.get(f"http://{tracker_addr}:{tracker_port}/nodes", timeout=5)
+                if response.status_code == 200:
+                    return response.json()
+            except requests.exceptions.RequestException as e:
+                print(f"Failed to contact tracker at {tracker_addr}:{tracker_port}: {e}")
+        return []
