@@ -130,9 +130,9 @@ class NetworkConfig:
             ('stun1.l.google.com', 19302),
             ('stun2.l.google.com', 19302)
         ]
-        self.trackers = [
-            ('45.79.195.214', 5000)  # Added dedicated tracker
-        ]
+        self.trackers = {
+            '45.79.195.214': 5000
+        }
         self.public_udp_addr = None
         self.local_udp_port = None
         self.local_tcp_port = None
