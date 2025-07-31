@@ -172,11 +172,11 @@ class NetworkConfig:
         
     def get_nodes_from_tracker(self):
         """Request list of nodes from the tracker"""
-        for tracker_addr, tracker_port in self.trackers:
+        for tracker_addr in self.trackers:
             try:
-                response = requests.get(f"http://{tracker_addr}:{tracker_port}/nodes", timeout=5)
+                response = requests.get(f"{tracker_addr}/nodes", timeout=5)
                 if response.status_code == 200:
                     return response.json()
             except requests.exceptions.RequestException as e:
-                print(f"Failed to contact tracker at {tracker_addr}:{tracker_port}: {e}")
+                print(f"Failed to contact tracker at {tracker_addr}: {e}")
         return {}
