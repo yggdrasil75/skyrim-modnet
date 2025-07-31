@@ -7,7 +7,8 @@ import random
 import requests
 import threading
 import time
-from config import NetworkConfig, NodeConfig
+from config import NodeConfig
+from network import NetworkConfig
 from flask import Flask, request, jsonify, render_template
 
 # --- Configuration & State ---
@@ -97,7 +98,6 @@ def data_replication_loop():
             pass
         except Exception as e:
             print(f"[{NODE_PORT}] Error in data replication loop: {e}")
-
 
 def peer_discovery_loop():
     """Periodically discover new peers using UDP hole punching"""
