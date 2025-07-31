@@ -21,6 +21,7 @@ NODE_HOST = '0.0.0.0'
 NODE_PORT = 5000 # Default, will be overridden by command line args
 Config = NodeConfig(NODE_ID)
 netConfig = NetworkConfig()
+netConfig.load_config()
 
 # A simple dictionary to store the addresses of other nodes (peers)
 # Format: { 'node_id': 'http://host:port' }
@@ -627,9 +628,7 @@ if __name__ == '__main__':
             print(f"TCP bootstrap failed: {e}")
 
     # Start maintenance threads
-    threading.Thread(target=peer_discovery_loop, daemon=True).start()
-    threading.Thread(target=peer_health_check_loop, daemon=True).start()
-    threading.Thread(target=discover_local_peers, daemon=True).start()
+    netConfig.start_background_tasks()
     threading.Thread(target=data_replication_loop, daemon=True).start() # Start the new replication loop
     
     print(f"Node {NODE_ID} started on http://{NODE_HOST}:{NODE_PORT}")
