@@ -24,6 +24,7 @@ class NetworkConfig:
         ]
         self.trackers = {
             'https://www.themoddingtree.com'
+            'http://localhost:8080'
         }
         self.public_udp_addr = None
         self.local_udp_port = None
