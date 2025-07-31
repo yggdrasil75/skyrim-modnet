@@ -23,8 +23,8 @@ class NetworkConfig:
             ('stun2.l.google.com', 19302)
         ]
         self.trackers = {
-            'https://www.themoddingtree.com',
-            'http://localhost:8080'
+            # 'https://www.themoddingtree.com',
+            # 'http://localhost:8080'
         }
         self.public_udp_addr = None
         self.local_udp_port = None

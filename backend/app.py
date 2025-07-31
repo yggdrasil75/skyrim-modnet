@@ -522,40 +522,73 @@ def get_peers():
     """Returns the list of peers known to this node."""
     return jsonify(PEERS)
 
+
+def parse_protocol_address(address):
+    # Extract host from protocol address
+    if address.startswith('http://'):
+        host = address[7:]
+        port = 80
+    elif address.startswith('https://'):
+        host = address[8:]
+        port = 443
+    else:
+        raise ValueError("Unsupported protocol")
+    
+    # Remove trailing slashes and path components
+    host = host.split('/')[0]
+    return host, port
+
 @app.route('/peers/register', methods=['POST'])
 def register_peer():
-    """
-    The endpoint for a new node to join the network.
-    A new node announces itself to an existing node.
-    """
     data = request.get_json()
-    peer_id = data.get('node_id')
-    peer_address = data.get('address')
+    peer_id = data.get('node_id', str(uuid.uuid4()))  # Generate ID if not provided
+    address = data['address']
+    
+    # Parse address
+    if '://' in address:  # Has protocol
+        # Handle protocol-based address (for trackers/holepunched peers)
+        netConfig.add_holepunched_peer(peer_id, *parse_protocol_address(address))
+    else:  # Has port
+        # Handle host:port address (for NAT peers)
+        host, port = address.split(':')
+        netConfig.add_nat_peer(peer_id, host, int(port))
+    
+    return jsonify({'status': 'success', 'peer_id': peer_id})
 
-    if not peer_id or not peer_address:
-        return "Invalid data", 400
+# @app.route('/peers/register', methods=['POST'])
+# def register_peer():
+#     """
+#     The endpoint for a new node to join the network.
+#     A new node announces itself to an existing node.
+#     """
+#     data = request.get_json()
+#     peer_id = data.get('node_id')
+#     peer_address = data.get('address')
 
-    if peer_id == NODE_ID: # Don't add self
-        return "Cannot register self", 200
+#     if not peer_id or not peer_address:
+#         return "Invalid data", 400
 
-    response_for_new_peer = {
-        "message": "Peer registered successfully.",
-        "known_peers": PEERS.copy()
-    }
-    response_for_new_peer['known_peers'][NODE_ID] = f"http://{NODE_HOST}:{NODE_PORT}"
+#     if peer_id == NODE_ID: # Don't add self
+#         return "Cannot register self", 200
 
-    PEERS[peer_id] = peer_address
-    print(f"[{NODE_PORT}] Registered new peer: {peer_id} at {peer_address}")
+#     response_for_new_peer = {
+#         "message": "Peer registered successfully.",
+#         "known_peers": PEERS.copy()
+#     }
+#     response_for_new_peer['known_peers'][NODE_ID] = f"http://{NODE_HOST}:{NODE_PORT}"
 
-    for existing_peer_id, existing_peer_address in response_for_new_peer['known_peers'].items():
-        if existing_peer_id != NODE_ID: 
-            try:
-                print(f"[{NODE_PORT}] Announcing new peer {peer_id} to {existing_peer_address}")
-                requests.post(f"{existing_peer_address}/peers/announce", json={'node_id': peer_id, 'address': peer_address})
-            except requests.exceptions.ConnectionError:
-                print(f"[{NODE_PORT}] Could not connect to peer {existing_peer_address} to announce.")
+#     PEERS[peer_id] = peer_address
+#     print(f"[{NODE_PORT}] Registered new peer: {peer_id} at {peer_address}")
 
-    return jsonify(response_for_new_peer)
+#     for existing_peer_id, existing_peer_address in response_for_new_peer['known_peers'].items():
+#         if existing_peer_id != NODE_ID: 
+#             try:
+#                 print(f"[{NODE_PORT}] Announcing new peer {peer_id} to {existing_peer_address}")
+#                 requests.post(f"{existing_peer_address}/peers/announce", json={'node_id': peer_id, 'address': peer_address})
+#             except requests.exceptions.ConnectionError:
+#                 print(f"[{NODE_PORT}] Could not connect to peer {existing_peer_address} to announce.")
+
+#     return jsonify(response_for_new_peer)
 
 @app.route('/peers/announce', methods=['POST'])
 def announce_peer():
