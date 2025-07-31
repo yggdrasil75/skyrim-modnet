@@ -139,7 +139,7 @@ class Tracker:
                     print(f"Removed inactive peer: {pid}")
 
 if __name__ == '__main__':
-    tracker = Tracker(port=5000)
+    tracker = Tracker(port=80)
     try:
         tracker.start()
         while True:

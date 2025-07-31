@@ -34,11 +34,18 @@ if not os.path.exists(DATA_STORE_PATH):
 
 def get_data_key(content):
     """Generates a SHA256 hash to use as the data's unique key."""
-    return hashlib.sha256(content.encode('utf-8')).hexdigest()
+    # Ensure content is bytes for hashing
+    if isinstance(content, str):
+        content = content.encode('utf-8')
+    return hashlib.sha256(content).hexdigest()
+
 
 def save_data_local(key, content):
     """Saves a piece of data to the node's local storage."""
-    with open(os.path.join(DATA_STORE_PATH, key), 'w') as f:
+    # Ensure content is string for writing to file
+    if isinstance(content, bytes):
+        content = content.decode('utf-8', 'replace')
+    with open(os.path.join(DATA_STORE_PATH, key), 'w', encoding='utf-8') as f:
         f.write(content)
     print(f"[{NODE_PORT}] Stored data with key: {key}")
 
@@ -46,9 +53,51 @@ def load_data_local(key):
     """Loads a piece of data from the node's local storage if it exists."""
     filepath = os.path.join(DATA_STORE_PATH, key)
     if os.path.exists(filepath):
-        with open(filepath, 'r') as f:
+        with open(filepath, 'r', encoding='utf-8') as f:
             return f.read()
     return None
+
+def data_replication_loop():
+    """Periodically replicates local data to random peers."""
+    while True:
+        # Wait for a randomized interval to avoid all nodes broadcasting at once
+        time.sleep(random.uniform(45, 90))
+
+        try:
+            # Get list of local data keys (filenames)
+            local_keys = [f for f in os.listdir(DATA_STORE_PATH) if os.path.isfile(os.path.join(DATA_STORE_PATH, f))]
+            
+            # Get a list of peers
+            peer_list = list(PEERS.items())
+
+            if not local_keys or not peer_list:
+                continue # Nothing to do
+
+            # Pick a random piece of data to replicate
+            key_to_replicate = random.choice(local_keys)
+            content = load_data_local(key_to_replicate)
+
+            if not content:
+                continue
+
+            # Pick a random peer to replicate to (but not ourselves)
+            peer_id, peer_address = random.choice(peer_list)
+            if peer_id == NODE_ID:
+                continue
+
+            print(f"[{NODE_PORT}] Attempting periodic replication of key {key_to_replicate} to {peer_address}")
+            requests.post(
+                f"{peer_address}/data/replicate",
+                json={'key': key_to_replicate, 'content': content},
+                timeout=5
+            )
+
+        except requests.exceptions.RequestException:
+            # This is expected if a peer is offline. The health check loop will handle it.
+            pass
+        except Exception as e:
+            print(f"[{NODE_PORT}] Error in data replication loop: {e}")
+
 
 def peer_discovery_loop():
     """Periodically discover new peers using UDP hole punching"""
@@ -352,7 +401,6 @@ def index():
     """
     Renders the primary index page with a search form.
     Also handles the search query submitted via the form.
-    The term "mods" is used in the template as requested, referring to data.
     """
     search_key = request.args.get('key', '').strip()
     found_content = None
@@ -366,6 +414,36 @@ def index():
                            peer_count=len(PEERS),
                            search_key=search_key,
                            data_content=found_content)
+
+@app.route('/upload', methods=['GET', 'POST'])
+def upload_file():
+    """
+    Handles file uploads from the web UI.
+    GET: Displays the upload page.
+    POST: Processes the uploaded file, saves it locally.
+          Replication is handled by the background loop.
+    """
+    if request.method == 'POST':
+        if 'file' not in request.files:
+            return render_template('upload.html', port=NODE_PORT, message='No file part in the request.', success=False)
+        
+        file = request.files['file']
+        
+        if file.filename == '':
+            return render_template('upload.html', port=NODE_PORT, message='No file selected.', success=False)
+        
+        if file:
+            content_bytes = file.read()
+            key = get_data_key(content_bytes)
+            save_data_local(key, content_bytes)
+            return render_template('upload.html',
+                                   port=NODE_PORT,
+                                   message=f'File "{file.filename}" uploaded successfully!',
+                                   new_key=key,
+                                   success=True)
+
+    # For GET request, just show the upload page
+    return render_template('upload.html', port=NODE_PORT)
 
 # --- API Endpoints ---
 @app.route('/peers/friends/add', methods=['POST'])
@@ -422,25 +500,18 @@ def register_peer():
     if peer_id == NODE_ID: # Don't add self
         return "Cannot register self", 200
 
-    # Prepare response for the new peer BEFORE we modify our PEERS list
-    # This ensures the new peer gets our current list, and we get theirs
     response_for_new_peer = {
         "message": "Peer registered successfully.",
         "known_peers": PEERS.copy()
     }
-    # Also add the registering node itself to the list it receives back
     response_for_new_peer['known_peers'][NODE_ID] = f"http://{NODE_HOST}:{NODE_PORT}"
 
-    # Add the new peer
     PEERS[peer_id] = peer_address
     print(f"[{NODE_PORT}] Registered new peer: {peer_id} at {peer_address}")
 
-    # --- Announce the new peer to our existing peers (Network Propagation) ---
-    # We announce the new peer to our old list of peers
     for existing_peer_id, existing_peer_address in response_for_new_peer['known_peers'].items():
-        if existing_peer_id != NODE_ID: # Don't announce to self
+        if existing_peer_id != NODE_ID: 
             try:
-                # Tell our other peers about the new node that just joined
                 print(f"[{NODE_PORT}] Announcing new peer {peer_id} to {existing_peer_address}")
                 requests.post(f"{existing_peer_address}/peers/announce", json={'node_id': peer_id, 'address': peer_address})
             except requests.exceptions.ConnectionError:
@@ -467,31 +538,21 @@ def announce_peer():
 @app.route('/data', methods=['POST'])
 def add_data():
     """
-    Adds a new piece of data to the network.
-    The node receiving the request will store it and replicate it.
+    Adds a new piece of data from a raw POST request (e.g., from an API client).
+    The node stores it locally. Replication is handled by the background loop.
     """
-    content = request.get_data(as_text=True)
+    content = request.get_data() # get as bytes
     if not content:
         return "No data provided", 400
 
     key = get_data_key(content)
     
-    # 1. Store the data locally
+    # Store the data locally
     save_data_local(key, content)
 
-    # 2. Replicate the data to a subset of peers (e.g., 2)
-    replication_count = 2
-    if len(PEERS) > 0:
-        peers_to_replicate = random.sample(list(PEERS.values()), min(len(PEERS), replication_count))
-        for peer_address in peers_to_replicate:
-            try:
-                print(f"[{NODE_PORT}] Replicating data {key} to {peer_address}")
-                requests.post(f"{peer_address}/data/replicate", json={'key': key, 'content': content}, timeout=3)
-            except requests.exceptions.RequestException:
-                print(f"[{NODE_PORT}] Failed to replicate data to {peer_address}")
-                # In a real system, you might queue this for retry
+    # Replication is now handled by the data_replication_loop, not immediately.
+    return jsonify({"message": "Data stored locally. It will be replicated to the network over time.", "key": key}), 201
 
-    return jsonify({"message": "Data stored successfully", "key": key}), 201
 
 @app.route('/data/replicate', methods=['POST'])
 def replicate_data():
@@ -507,7 +568,6 @@ def replicate_data():
 def get_data(key):
     """
     API endpoint to retrieve data. Checks locally, then asks peers.
-    Uses the refactored find_data_in_network function.
     """
     content = find_data_in_network(key)
     if content:
@@ -520,25 +580,22 @@ def get_data(key):
 
 if __name__ == '__main__':
     if len(sys.argv) < 2:
-        print("Usage: python node.py <port> [bootstrap_address]")
+        print("Usage: python app.py <port> [bootstrap_address]")
+        sys.exit(1)
 
     NODE_PORT = int(sys.argv[1])
     
-    # Determine NAT type and public address
     netConfig.nat_type = netConfig.get_nat_type()
     print(f"NAT Type: {netConfig.nat_type}")
     
-    # Start UDP server
     threading.Thread(target=udp_server_thread, daemon=True).start()
     
-    # Start TCP server (Flask)
     threading.Thread(target=lambda: app.run(
         host=NODE_HOST, 
         port=NODE_PORT,
         threaded=True
     ), daemon=True).start()
     
-    # Get initial nodes from tracker
     tracker_nodes = netConfig.get_nodes_from_tracker()
     for node_id, node_address in tracker_nodes:
         if node_id != NODE_ID and node_id not in PEERS:
@@ -546,12 +603,10 @@ if __name__ == '__main__':
             Config.add_peer(node_id, node_address)
             print(f"[{NODE_PORT}] Added node from tracker: {node_id} at {node_address}")
     
-    # Bootstrap if needed
     if len(sys.argv) > 2:
         bootstrap_address = sys.argv[2]
         print(f"Attempting NAT traversal with bootstrap node...")
         
-        # Try UDP first
         if netConfig.public_udp_addr:
             host, port = bootstrap_address.split(':')
             try:
@@ -560,9 +615,8 @@ if __name__ == '__main__':
             except Exception as e:
                 print(f"UDP bootstrap failed: {e}")
         
-        # Fall back to TCP
         try:
-            my_address = f"{NODE_HOST}:{NODE_PORT}"
+            my_address = f"http://{NODE_HOST}:{NODE_PORT}"
             response = requests.post(f"http://{bootstrap_address}/peers/register", 
                                    json={'node_id': NODE_ID, 'address': my_address},
                                    timeout=5)
@@ -576,8 +630,16 @@ if __name__ == '__main__':
     threading.Thread(target=peer_discovery_loop, daemon=True).start()
     threading.Thread(target=peer_health_check_loop, daemon=True).start()
     threading.Thread(target=discover_local_peers, daemon=True).start()
+    threading.Thread(target=data_replication_loop, daemon=True).start() # Start the new replication loop
+    
+    print(f"Node {NODE_ID} started on http://{NODE_HOST}:{NODE_PORT}")
     
     # Keep main thread alive
-    while True:
-        time.sleep(10000)
+    try:
+        while True:
+            time.sleep(10000)
+            Config.save_config()
+    except KeyboardInterrupt:
+        print("\nShutting down node...")
         Config.save_config()
+        sys.exit(0)
