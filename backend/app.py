@@ -616,7 +616,7 @@ if __name__ == '__main__':
                 print(f"UDP bootstrap failed: {e}")
         
         try:
-            my_address = f"http://{NODE_HOST}:{NODE_PORT}"
+            my_address = f"{NODE_HOST}:{NODE_PORT}"
             response = requests.post(f"http://{bootstrap_address}/peers/register", 
                                    json={'node_id': NODE_ID, 'address': my_address},
                                    timeout=5)
