@@ -33,7 +33,9 @@ class NetworkConfig:
         self.config_path = 'netConf.json'
         
         # Peer management
-        self.nat_peers: dict[str, tuple[str, int]] = {}  # {peer_id: (ip, port)}
+        self.nat_peers: dict[str, tuple[str, int]] = {
+            '5b04c1e0-c432-4b92-a184-1b199c5665d7': ('www.themoddingtree.com', 443)
+        }  # {peer_id: (ip, port)}
         self.holepunched_peers: dict[str, tuple[str, int]] = {}  # {peer_id: (ip, port)}
         self.friends: set[str] = set()  # set of peer_ids
         self.blacklist: set[str] = set()  # set of peer_ids

@@ -443,7 +443,47 @@ def upload_file():
     # For GET request, just show the upload page
     return render_template('upload.html', port=NODE_PORT)
 
+@app.route('/config')
+def config_page():
+    """Render the configuration page"""
+    return render_template('config.html', port=NODE_PORT)
+
 # --- API Endpoints ---
+
+@app.route('/network/info', methods=['GET'])
+def get_network_info():
+    """Get current network configuration information"""
+    return jsonify({
+        'nat_type': netConfig.nat_type,
+        'public_udp_addr': netConfig.public_udp_addr,
+        'local_udp_port': netConfig.local_udp_port,
+        'local_tcp_port': netConfig.local_tcp_port
+    })
+
+@app.route('/network/trackers', methods=['GET'])
+def get_trackers():
+    """Get list of configured trackers and their status"""
+    trackers = []
+    for tracker_addr in netConfig.trackers:
+        try:
+            response = requests.get(f"{tracker_addr}/status", timeout=3)
+            status = "Online" if response.status_code == 200 else "Offline"
+        except requests.exceptions.RequestException:
+            status = "Offline"
+        trackers.append({'url': tracker_addr, 'status': status})
+    return jsonify(trackers)
+
+@app.route('/network/trackers/add', methods=['POST'])
+def add_tracker():
+    """Add a new tracker to the configuration"""
+    data = request.get_json()
+    tracker_url = data.get('tracker_url')
+    if tracker_url:
+        netConfig.trackers.add(tracker_url)
+        netConfig.save_config()
+        return jsonify({"status": "success"})
+    return jsonify({"status": "error", "message": "Invalid tracker URL"}), 400
+
 @app.route('/peers/friends/add', methods=['POST'])
 def add_friend():
     """Add a peer to friends list"""
