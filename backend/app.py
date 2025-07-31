@@ -178,8 +178,17 @@ def send_message(peer_id, message, use_udp=True):
         print(f"TCP send failed: {e}")
         return False
 
-
-
+def udp_server_thread():
+    """Handle incoming UDP messages"""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.bind(('0.0.0.0', netConfig.local_udp_port))
+    
+    while True:
+        try:
+            data, addr = sock.recvfrom(1024)
+            threading.Thread(target=handle_udp_message, args=(data, addr)).start()
+        except Exception as e:
+            print(f"UDP server error: {e}")
 
 def handle_peer_discovery(addr):
     """Handle incoming peer discovery message"""
