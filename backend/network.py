@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 from typing import Optional
 import threading
 
-LoggingLevel: int = 3  # 0: "normal". 3: "excessive"
+LoggingLevel: int = 2  # 0: "normal". 3: "excessive"
 
 class NetworkConfig:
     def __init__(self):
