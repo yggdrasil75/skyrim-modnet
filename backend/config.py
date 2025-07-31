@@ -172,7 +172,7 @@ class NetworkConfig:
         
     def get_nodes_from_tracker(self):
         """Request list of nodes from the tracker"""
-        for tracker_addr, tracker_port in self.trackers:
+        for tracker_addr, tracker_port in self.trackers.items():
             try:
                 response = requests.get(f"http://{tracker_addr}:{tracker_port}/nodes", timeout=5)
                 if response.status_code == 200:
