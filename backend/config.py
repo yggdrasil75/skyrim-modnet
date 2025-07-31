@@ -131,7 +131,7 @@ class NetworkConfig:
             ('stun2.l.google.com', 19302)
         ]
         self.trackers = {
-            '45.79.195.214': 5000
+            'https://www.themoddingtree.com/'
         }
         self.public_udp_addr = None
         self.local_udp_port = None
