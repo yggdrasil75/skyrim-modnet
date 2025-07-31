@@ -16,7 +16,7 @@ app = Flask(__name__, static_folder="../frontend", template_folder="../templates
 
 # Each node needs a unique ID and an address
 NODE_ID = str(uuid.uuid4())
-NODE_HOST = '127.0.0.1'
+NODE_HOST = '0.0.0.0'
 NODE_PORT = 5000 # Default, will be overridden by command line args
 Config = NodeConfig(NODE_ID)
 netConfig = NetworkConfig()
