@@ -1,714 +1,316 @@
 import os
-import socket
-import sys
-import uuid
 import hashlib
-import random
-import requests
+import math
+import sqlite3
 import threading
 import time
-from config import NodeConfig
-from network import NetworkConfig
-from flask import Flask, request, jsonify, render_template
+import uuid
+from flask import Flask, render_template, request, send_file, redirect, url_for
+from werkzeug.utils import secure_filename
+import py7zr
+from PIL import Image
+import io
 
-# --- Configuration & State ---
+app = Flask(__name__)
+app.config['UPLOAD_FOLDER'] = 'uploads'
+app.config['CHUNK_SIZE'] = 1024 * 1024 * 5  # 5MB chunks
+app.config['MAX_STORAGE'] = 1024 * 1024 * 1024  # 1GB default
+app.config['NETWORK_THROTTLE'] = 1024 * 1024  # 1MB/s
+app.config['DATABASE'] = 'node.db'
+app.config['NODE_ID'] = str(uuid.uuid4())
 
-app = Flask(__name__, static_folder="../frontend", template_folder="../templates")
+# Initialize database
+def init_db():
+    conn = sqlite3.connect(app.config['DATABASE'])
+    c = conn.cursor()
+    
+    # Mod metadata
+    c.execute('''CREATE TABLE IF NOT EXISTS mods
+                 (id TEXT PRIMARY KEY, title TEXT, short_desc TEXT, 
+                 long_desc TEXT, author TEXT, image_hash TEXT, 
+                 timestamp REAL, chunk_count INTEGER)''')
+    
+    # File chunks
+    c.execute('''CREATE TABLE IF NOT EXISTS chunks
+                 (hash TEXT PRIMARY KEY, data BLOB, 
+                 mod_id TEXT, size INTEGER, 
+                 FOREIGN KEY(mod_id) REFERENCES mods(id))''')
+    
+    # Network peers
+    c.execute('''CREATE TABLE IF NOT EXISTS peers
+                 (id TEXT PRIMARY KEY, address TEXT, last_seen REAL, 
+                 status TEXT, bandwidth INTEGER, storage_used INTEGER)''')
+    
+    # Local configuration
+    c.execute('''CREATE TABLE IF NOT EXISTS config
+                 (key TEXT PRIMARY KEY, value TEXT)''')
+    
+    # Set default config if not exists
+    c.execute("INSERT OR IGNORE INTO config VALUES ('max_storage', ?)", 
+              (str(app.config['MAX_STORAGE']),))
+    c.execute("INSERT OR IGNORE INTO config VALUES ('max_bandwidth', ?)", 
+              (str(app.config['NETWORK_THROTTLE']),))
+    
+    conn.commit()
+    conn.close()
 
-# Each node needs a unique ID and an address
-NODE_ID = str(uuid.uuid4())
-NODE_HOST = '0.0.0.0'
-NODE_PORT = 5000 # Default, will be overridden by command line args
-Config = NodeConfig(NODE_ID)
-netConfig = NetworkConfig()
-netConfig.load_config()
+init_db()
 
-# A simple dictionary to store the addresses of other nodes (peers)
-# Format: { 'node_id': 'http://host:port' }
-PEERS = {}
-
-# The path where this node stores its data chunks
-DATA_STORE_PATH = f"./data_{NODE_PORT}"
-if not os.path.exists(DATA_STORE_PATH):
-    os.makedirs(DATA_STORE_PATH)
-
-# --- Helper Functions ---
-
-def get_data_key(content):
-    """Generates a SHA256 hash to use as the data's unique key."""
-    # Ensure content is bytes for hashing
-    if isinstance(content, str):
-        content = content.encode('utf-8')
-    return hashlib.sha256(content).hexdigest()
-
-def save_data_local(key, content):
-    """Saves a piece of data to the node's local storage."""
-    # Ensure content is string for writing to file
-    if isinstance(content, bytes):
-        content = content.decode('utf-8', 'replace')
-    with open(os.path.join(DATA_STORE_PATH, key), 'w', encoding='utf-8') as f:
-        f.write(content)
-    print(f"[{NODE_PORT}] Stored data with key: {key}")
-
-def load_data_local(key):
-    """Loads a piece of data from the node's local storage if it exists."""
-    filepath = os.path.join(DATA_STORE_PATH, key)
-    if os.path.exists(filepath):
-        with open(filepath, 'r', encoding='utf-8') as f:
-            return f.read()
-    return None
-
-def data_replication_loop():
-    """Periodically replicates local data to random peers."""
+# File Processing Functions
+def process_upload(file, title, short_desc, long_desc, image_file=None):
+    """Process uploaded mod file and metadata"""
+    # Generate mod ID
+    file_hash = hashlib.sha256()
+    chunk_hashes = []
+    
+    # Process file chunks
+    chunk_count = 0
     while True:
-        # Wait for a randomized interval to avoid all nodes broadcasting at once
-        time.sleep(random.uniform(45, 90))
-
+        chunk = file.read(app.config['CHUNK_SIZE'])
+        if not chunk:
+            break
+        
+        # Generate chunk hash
+        chunk_hash = hashlib.sha256(chunk).hexdigest()
+        chunk_hashes.append(chunk_hash)
+        
+        # Store chunk in DB
+        conn = sqlite3.connect(app.config['DATABASE'])
+        c = conn.cursor()
+        c.execute("INSERT OR IGNORE INTO chunks VALUES (?, ?, ?, ?)",
+                  (chunk_hash, chunk, None, len(chunk)))
+        conn.commit()
+        conn.close()
+        
+        file_hash.update(chunk)
+        chunk_count += 1
+    
+    mod_id = file_hash.hexdigest()
+    
+    # Process image
+    image_hash = None
+    if image_file:
         try:
-            # Get list of local data keys (filenames)
-            local_keys = [f for f in os.listdir(DATA_STORE_PATH) if os.path.isfile(os.path.join(DATA_STORE_PATH, f))]
+            # Resize and compress image
+            img = Image.open(image_file)
+            img.thumbnail((400, 400))
+            img_byte_arr = io.BytesIO()
+            img.save(img_byte_arr, format='JPEG', quality=85)
+            image_data = img_byte_arr.getvalue()
+            image_hash = hashlib.sha256(image_data).hexdigest()
             
-            # Get a list of peers
-            peer_list = list(PEERS.items())
+            # Store image as chunk
+            conn = sqlite3.connect(app.config['DATABASE'])
+            c = conn.cursor()
+            c.execute("INSERT OR IGNORE INTO chunks VALUES (?, ?, ?, ?)",
+                      (image_hash, image_data, mod_id, len(image_data)))
+            conn.commit()
+            conn.close()
+        except:
+            image_hash = None
+    
+    # Store mod metadata
+    conn = sqlite3.connect(app.config['DATABASE'])
+    c = conn.cursor()
+    c.execute("INSERT INTO mods VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+              (mod_id, title, short_desc, long_desc, "User", 
+               image_hash, time.time(), chunk_count))
+    
+    # Associate chunks with mod
+    for chunk_hash in chunk_hashes:
+        c.execute("UPDATE chunks SET mod_id = ? WHERE hash = ?",
+                  (mod_id, chunk_hash))
+    
+    conn.commit()
+    conn.close()
+    
+    # Start replication in background
+    threading.Thread(target=replicate_mod, args=(mod_id,)).start()
+    
+    return mod_id
 
-            if not local_keys or not peer_list:
-                continue # Nothing to do
+def replicate_mod(mod_id):
+    """Replicate mod to trusted peers"""
+    conn = sqlite3.connect(app.config['DATABASE'])
+    c = conn.cursor()
+    
+    # Get mod metadata
+    c.execute("SELECT * FROM mods WHERE id = ?", (mod_id,))
+    mod = c.fetchone()
+    
+    # Get associated chunks
+    c.execute("SELECT hash FROM chunks WHERE mod_id = ?", (mod_id,))
+    chunks = [row[0] for row in c.fetchall()]
+    
+    # Get trusted peers
+    c.execute("SELECT id, address FROM peers WHERE status = 'friend'")
+    peers = c.fetchall()
+    
+    conn.close()
+    
+    # Distribute to peers (simplified)
+    for peer_id, address in peers:
+        try:
+            # In real implementation: Send mod metadata and chunks to peer
+            print(f"Replicating {mod_id} to {address}")
+            # This would use network transmission with throttling
+        except:
+            print(f"Failed to replicate to {address}")
 
-            # Pick a random piece of data to replicate
-            key_to_replicate = random.choice(local_keys)
-            content = load_data_local(key_to_replicate)
-
-            if not content:
-                continue
-
-            # Pick a random peer to replicate to (but not ourselves)
-            peer_id, peer_address = random.choice(peer_list)
-            if peer_id == NODE_ID:
-                continue
-
-            print(f"[{NODE_PORT}] Attempting periodic replication of key {key_to_replicate} to {peer_address}")
-            requests.post(
-                f"{peer_address}/data/replicate",
-                json={'key': key_to_replicate, 'content': content},
-                timeout=5
-            )
-
-        except requests.exceptions.RequestException:
-            # This is expected if a peer is offline. The health check loop will handle it.
-            pass
-        except Exception as e:
-            print(f"[{NODE_PORT}] Error in data replication loop: {e}")
-
-def peer_discovery_loop():
-    """Periodically discover new peers using UDP hole punching"""
+# Network Management
+def manage_peers():
+    """Periodically update peer status and replicate data"""
     while True:
-        time.sleep(60)
+        conn = sqlite3.connect(app.config['DATABASE'])
+        c = conn.cursor()
         
-        # Try UDP hole punching with known peers
-        for peer_id, peer_address in list(PEERS.items()):
-            host, port = peer_address.split(':')
-            try:
-                # Send UDP packet to trigger hole punching
-                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-                    sock.sendto(b"HOLE_PUNCH", (host, int(port)))
-            except Exception as e:
-                print(f"UDP hole punching failed with {peer_id}: {e}")
-                
-        # Also maintain TCP fallback discovery
-        current_peers = list(Config.config['peers'].items())
-        if current_peers:
-            peer_id, peer_address = random.choice(current_peers)
-            try:
-                response = requests.get(f"http://{peer_address}/peers", timeout=5)
-                if response.status_code == 200:
-                    new_peers = response.json()
-                    for new_peer_id, new_peer_address in new_peers.items():
-                        if (new_peer_id != NODE_ID and 
-                            new_peer_id not in Config.config['peers'] and 
-                            new_peer_id not in Config.config['blacklist']):
-                            Config.add_peer(new_peer_id, new_peer_address)
-            except requests.exceptions.RequestException:
-                Config.update_peer_stats(peer_id, success=False)
-
-def peer_health_check_loop():
-    """Periodically check peer health and update stats"""
-    while True:
-        time.sleep(30)  # Run every 30 seconds
+        # Update peer status based on activity
+        c.execute("UPDATE peers SET status = 'stranger' WHERE last_seen < ?",
+                  (time.time() - 604800,))  # 1 week
         
-        for peer_id, peer_address in list(Config.config['peers'].items()):
-            try:
-                start_time = time.time()
-                response = requests.get(f"{peer_address}/status", timeout=3)
-                response_time = time.time() - start_time
-                
-                if response.status_code == 200:
-                    Config.update_peer_stats(peer_id, response_time, success=True)
-                else:
-                    Config.update_peer_stats(peer_id, success=False)
-            except requests.exceptions.RequestException:
-                Config.update_peer_stats(peer_id, success=False)
-                # If peer fails too many times, blacklist it
-                if Config.config['peer_stats'][peer_id]['fail_count'] > 3:
-                    Config.add_to_blacklist(peer_id)
-                    print(f"[{NODE_PORT}] Blacklisted unresponsive peer: {peer_id}")
-
-def send_message(peer_id, message, use_udp=True):
-    """Send message to peer, trying UDP first then falling back to TCP"""
-    peer_address = PEERS.get(peer_id)
-    if not peer_address:
-        return False
-    
-    if use_udp:
-        try:
-            # Try UDP first
-            host, port = peer_address.split(':')
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-                sock.sendto(message.encode(), (host, int(port)))
-                return True
-        except Exception as e:
-            print(f"UDP send failed, falling back to TCP: {e}")
-    
-    # Fall back to TCP
-    try:
-        response = requests.post(f"http://{peer_address}/api", 
-                               data=message, 
-                               timeout=3)
-        return response.status_code == 200
-    except Exception as e:
-        print(f"TCP send failed: {e}")
-        return False
-
-def udp_server_thread():
-    """Handle incoming UDP messages"""
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.bind(('0.0.0.0', netConfig.local_udp_port))
-    
-    while True:
-        try:
-            data, addr = sock.recvfrom(1024)
-            threading.Thread(target=handle_udp_message, args=(data, addr)).start()
-        except Exception as e:
-            print(f"UDP server error: {e}")
-
-def handle_peer_discovery(addr):
-    """Handle incoming peer discovery message"""
-    try:
-        peer_host, peer_port = addr
-        peer_address = f"{peer_host}:{peer_port}"
+        # Replicate popular mods
+        c.execute("SELECT id FROM mods ORDER BY timestamp DESC LIMIT 10")
+        popular_mods = [row[0] for row in c.fetchall()]
         
-        # Check if we already know this peer
-        known_peer = None
-        for peer_id, known_addr in PEERS.items():
-            if known_addr == peer_address:
-                known_peer = peer_id
-                break
+        for mod_id in popular_mods:
+            replicate_mod(mod_id)
         
-        if known_peer:
-            # Update last seen time
-            Config.update_peer_stats(known_peer, success=True)
-        else:
-            # Register new peer
-            peer_id = str(uuid.uuid4())  # In real implementation, peer would send its ID
-            PEERS[peer_id] = peer_address
-            Config.add_peer(peer_id, peer_address)
-            print(f"[{NODE_PORT}] Discovered new peer via UDP: {peer_id} at {peer_address}")
-            
-    except Exception as e:
-        print(f"Error handling peer discovery: {e}")
+        conn.commit()
+        conn.close()
+        time.sleep(3600)  # Run hourly
 
-def handle_data_transfer(message, addr):
-    """Handle incoming data transfer message"""
-    try:
-        parts = message.split('|')
-        if len(parts) < 3:
-            return
-            
-        command = parts[0]
-        key = parts[1]
-        content = '|'.join(parts[2:])  # Rejoin in case content contained pipes
-        
-        if command == "DATA_TRANSFER":
-            # Save the received data
-            save_data_local(key, content)
-            print(f"[{NODE_PORT}] Received data via UDP: {key}")
-            
-        elif command == "REQUEST_DATA":
-            # Check if we have the requested data
-            local_content = load_data_local(key)
-            if local_content:
-                # Send response back to requester
-                peer_host, peer_port = addr
-                peer_address = f"{peer_host}:{peer_port}"
-                send_data_udp(peer_address, f"DATA_RESPONSE|{key}|{local_content}", "")
-                
-    except Exception as e:
-        print(f"Error handling data transfer: {e}")
+# Start background management
+threading.Thread(target=manage_peers, daemon=True).start()
 
-# Update the send_message function to handle address formats consistently
-def send_message(peer_id, message, use_udp=True):
-    """Send message to peer, trying UDP first then falling back to TCP"""
-    peer_address = PEERS.get(peer_id)
-    if not peer_address:
-        return False
-    
-    # Normalize address (remove http:// if present)
-    if peer_address.startswith('http://'):
-        peer_address = peer_address[7:]
-    
-    if use_udp:
-        try:
-            # Try UDP first
-            host, port = peer_address.split(':')
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-                sock.sendto(message.encode(), (host, int(port)))
-                return True
-        except Exception as e:
-            print(f"UDP send failed, falling back to TCP: {e}")
-    
-    # Fall back to TCP
-    try:
-        response = requests.post(f"http://{peer_address}/api", 
-                               data=message, 
-                               timeout=3)
-        return response.status_code == 200
-    except Exception as e:
-        print(f"TCP send failed: {e}")
-        return False
-
-# Update the find_data_in_network function to properly handle UDP requests
-def find_data_in_network(key):
-    """Modified to try UDP first, then TCP"""
-    # 1. Check local storage
-    content = load_data_local(key)
-    if content:
-        return content
-
-    # 2. Try UDP with prioritized peers
-    peers_to_ask = Config.get_best_peers(3)
-    
-    for peer_id, peer_address in peers_to_ask:
-        # Normalize address
-        if peer_address.startswith('http://'):
-            peer_address = peer_address[7:]
-            
-        # Send request
-        if send_data_udp(peer_address, f"REQUEST_DATA|{key}", ""):
-            # Wait briefly for response (simplified - in real impl would use async)
-            time.sleep(0.5)
-            # Check if we got the data while waiting
-            content = load_data_local(key)
-            if content:
-                return content
-    
-    # 3. Fall back to TCP
-    for peer_id, peer_address in peers_to_ask:
-        try:
-            response = requests.get(f"http://{peer_address}/data/{key}", timeout=3)
-            if response.status_code == 200:
-                return response.text
-        except requests.exceptions.RequestException:
-            continue
-    
-    return None
-
-def handle_udp_message(data, addr):
-    """Process incoming UDP message"""
-    try:
-        message = data.decode()
-        # Process different message types (peer discovery, data transfer, etc.)
-        if message.startswith("PEER_DISCOVERY"):
-            handle_peer_discovery(addr)
-        elif message.startswith("DATA_TRANSFER"):
-            handle_data_transfer(message, addr)
-        # Add other message types as needed
-    except Exception as e:
-        print(f"Error processing UDP message: {e}")
-
-def send_data_udp(peer_address, key, content):
-    """Send data via UDP if possible"""
-    try:
-        host, port = peer_address.split(':')
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-            # Simple protocol: <COMMAND>|<KEY>|<DATA>
-            message = f"DATA_TRANSFER|{key}|{content}"
-            sock.sendto(message.encode(), (host, int(port)))
-            return True
-    except Exception as e:
-        print(f"UDP data transfer failed: {e}")
-        return False
-
-def discover_local_peers():
-    """Discover peers on the local network using UDP broadcast/multicast"""
-    # Use a well-known multicast address and port for discovery
-    MULTICAST_GROUP = '224.1.1.1'
-    MULTICAST_PORT = 5007
-    DISCOVERY_INTERVAL = 300  # 5 minutes between discovery attempts
-    
-    # Create a UDP socket
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
-    
-    # Set socket options for multicast
-    sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    
-    # Bind to the discovery port
-    sock.bind(('0.0.0.0', MULTICAST_PORT))
-    
-    # Add socket to multicast group
-    mreq = socket.inet_aton(MULTICAST_GROUP) + socket.inet_aton('0.0.0.0')
-    sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
-    
-    # Set socket timeout to prevent blocking forever
-    sock.settimeout(5.0)
-    
-    while True:
-        try:
-            # Send discovery message periodically
-            message = f"DISCOVERY|{NODE_ID}|{NODE_HOST}:{NODE_PORT}"
-            sock.sendto(message.encode(), (MULTICAST_GROUP, MULTICAST_PORT))
-            
-            # Listen for responses
-            while True:
-                try:
-                    data, addr = sock.recvfrom(1024)
-                    message = data.decode()
-                    if message.startswith("DISCOVERY|"):
-                        parts = message.split('|')
-                        if len(parts) >= 3:
-                            peer_id = parts[1]
-                            peer_address = parts[2]
-                            
-                            # Don't add self
-                            if peer_id != NODE_ID and peer_id not in PEERS:
-                                PEERS[peer_id] = peer_address
-                                Config.add_peer(peer_id, peer_address)
-                                print(f"[{NODE_PORT}] Discovered local peer: {peer_id} at {peer_address}")
-                except socket.timeout:
-                    break
-                    
-        except Exception as e:
-            print(f"Local discovery error: {e}")
-        
-        # Wait before next discovery attempt
-        time.sleep(DISCOVERY_INTERVAL)
-
-# --- Web UI Endpoints ---
-
-@app.route('/', methods=['GET'])
+# Web Interface
+@app.route('/')
 def index():
-    """
-    Renders the primary index page with a search form.
-    Also handles the search query submitted via the form.
-    """
-    search_key = request.args.get('key', '').strip()
-    found_content = None
+    """Show available mods"""
+    conn = sqlite3.connect(app.config['DATABASE'])
+    c = conn.cursor()
+    c.execute("SELECT id, title, short_desc, image_hash FROM mods")
+    mods = [{
+        'id': row[0],
+        'title': row[1],
+        'desc': row[2],
+        'image': row[3]
+    } for row in c.fetchall()]
+    conn.close()
+    return render_template('index.html', mods=mods)
 
-    if search_key:
-        found_content = find_data_in_network(search_key)
+@app.route('/mod/<mod_id>')
+def mod_page(mod_id):
+    """Show mod details"""
+    conn = sqlite3.connect(app.config['DATABASE'])
+    c = conn.cursor()
+    c.execute("SELECT * FROM mods WHERE id = ?", (mod_id,))
+    mod = c.fetchone()
+    
+    if not mod:
+        return "Mod not found", 404
+    
+    mod_data = {
+        'id': mod[0],
+        'title': mod[1],
+        'short_desc': mod[2],
+        'long_desc': mod[3],
+        'author': mod[4],
+        'image': mod[5],
+        'date': time.ctime(mod[6])
+    }
+    
+    # Get peer availability
+    c.execute("SELECT COUNT(*) FROM peers WHERE status IN ('friend', 'stranger')")
+    peer_count = c.fetchone()[0]
+    
+    conn.close()
+    return render_template('mod.html', mod=mod_data, peers=peer_count)
 
-    return render_template('index.html',
-                           node_id=NODE_ID,
-                           port=NODE_PORT,
-                           peer_count=len(PEERS),
-                           search_key=search_key,
-                           data_content=found_content)
+@app.route('/download/<mod_id>')
+def download_mod(mod_id):
+    """Reassemble and serve mod file"""
+    conn = sqlite3.connect(app.config['DATABASE'])
+    c = conn.cursor()
+    
+    # Get mod chunks
+    c.execute("SELECT data FROM chunks WHERE mod_id = ? ORDER BY hash", (mod_id,))
+    chunks = [row[0] for row in c.fetchall()]
+    
+    if not chunks:
+        return "Mod not available", 404
+    
+    # Reassemble file
+    full_file = b''.join(chunks)
+    conn.close()
+    
+    # Send as downloadable file
+    return send_file(
+        io.BytesIO(full_file),
+        mimetype='application/octet-stream',
+        as_attachment=True,
+        download_name=f"{mod_id[:8]}.7z"
+    )
 
 @app.route('/upload', methods=['GET', 'POST'])
-def upload_file():
-    """
-    Handles file uploads from the web UI.
-    GET: Displays the upload page.
-    POST: Processes the uploaded file, saves it locally.
-          Replication is handled by the background loop.
-    """
+def upload():
     if request.method == 'POST':
-        if 'file' not in request.files:
-            return render_template('upload.html', port=NODE_PORT, message='No file part in the request.', success=False)
+        # Process form data
+        title = request.form['title']
+        short_desc = request.form['short_desc']
+        long_desc = request.form['long_desc']
+        mod_file = request.files['mod_file']
+        image_file = request.files.get('image')
         
-        file = request.files['file']
+        # Process upload
+        mod_id = process_upload(
+            mod_file, title, short_desc, long_desc, image_file
+        )
         
-        if file.filename == '':
-            return render_template('upload.html', port=NODE_PORT, message='No file selected.', success=False)
+        return redirect(url_for('mod_page', mod_id=mod_id))
+    
+    return render_template('upload.html')
+
+@app.route('/settings', methods=['GET', 'POST'])
+def settings():
+    conn = sqlite3.connect(app.config['DATABASE'])
+    c = conn.cursor()
+    
+    if request.method == 'POST':
+        # Update config
+        max_storage = int(request.form['max_storage'])
+        max_bandwidth = int(request.form['max_bandwidth'])
         
-        if file:
-            content_bytes = file.read()
-            key = get_data_key(content_bytes)
-            save_data_local(key, content_bytes)
-            return render_template('upload.html',
-                                   port=NODE_PORT,
-                                   message=f'File "{file.filename}" uploaded successfully!',
-                                   new_key=key,
-                                   success=True)
-
-    # For GET request, just show the upload page
-    return render_template('upload.html', port=NODE_PORT)
-
-@app.route('/config')
-def config_page():
-    """Render the configuration page"""
-    return render_template('config.html', port=NODE_PORT)
-
-# --- API Endpoints ---
-
-@app.route('/network/info', methods=['GET'])
-def get_network_info():
-    """Get current network configuration information"""
-    return jsonify({
-        'nat_type': netConfig.nat_type,
-        'public_udp_addr': netConfig.public_udp_addr,
-        'local_udp_port': netConfig.local_udp_port,
-        'local_tcp_port': netConfig.local_tcp_port
-    })
-
-@app.route('/network/trackers', methods=['GET'])
-def get_trackers():
-    """Get list of configured trackers and their status"""
-    trackers = []
-    for tracker_addr in netConfig.trackers:
-        try:
-            response = requests.get(f"{tracker_addr}/status", timeout=3)
-            status = "Online" if response.status_code == 200 else "Offline"
-        except requests.exceptions.RequestException:
-            status = "Offline"
-        trackers.append({'url': tracker_addr, 'status': status})
-    return jsonify(trackers)
-
-@app.route('/network/trackers/add', methods=['POST'])
-def add_tracker():
-    """Add a new tracker to the configuration"""
-    data = request.get_json()
-    tracker_url = data.get('tracker_url')
-    if tracker_url:
-        netConfig.trackers.add(tracker_url)
-        netConfig.save_config()
-        return jsonify({"status": "success"})
-    return jsonify({"status": "error", "message": "Invalid tracker URL"}), 400
-
-@app.route('/peers/friends/add', methods=['POST'])
-def add_friend():
-    """Add a peer to friends list"""
-    data = request.get_json()
-    peer_id = data.get('peer_id')
-    if peer_id in Config.config['peers']:
-        Config.add_friend(peer_id)
-        return jsonify({"status": "success"})
-    return jsonify({"status": "error", "message": "Peer not found"}), 404
-
-@app.route('/peers/blacklist/add', methods=['POST'])
-def add_to_blacklist():
-    """Add a peer to blacklist"""
-    data = request.get_json()
-    peer_id = data.get('peer_id')
-    Config.add_to_blacklist(peer_id)
-    return jsonify({"status": "success"})
-
-@app.route('/peers/stats', methods=['GET'])
-def get_peer_stats():
-    """Get peer statistics"""
-    return jsonify(Config.config['peer_stats'])
-
-@app.route('/status')
-def status():
-    """A simple JSON status endpoint for the node."""
-    return jsonify({
-        "message": "This node is active.",
-        "node_id": NODE_ID,
-        "port": NODE_PORT,
-        "known_peers": len(PEERS)
-    })
-
-@app.route('/peers', methods=['GET'])
-def get_peers():
-    """Returns the list of peers known to this node."""
-    return jsonify(PEERS)
-
-
-def parse_protocol_address(address):
-    # Extract host from protocol address
-    if address.startswith('http://'):
-        host = address[7:]
-        port = 80
-    elif address.startswith('https://'):
-        host = address[8:]
-        port = 443
-    else:
-        raise ValueError("Unsupported protocol")
+        c.execute("UPDATE config SET value = ? WHERE key = 'max_storage'", 
+                  (str(max_storage),))
+        c.execute("UPDATE config SET value = ? WHERE key = 'max_bandwidth'", 
+                  (str(max_bandwidth),))
+        
+        # Update peers
+        for key, value in request.form.items():
+            if key.startswith('peer_status_'):
+                peer_id = key[12:]
+                new_status = value
+                c.execute("UPDATE peers SET status = ? WHERE id = ?", 
+                          (new_status, peer_id))
+        
+        conn.commit()
     
-    # Remove trailing slashes and path components
-    host = host.split('/')[0]
-    return host, port
-
-@app.route('/peers/register', methods=['POST'])
-def register_peer():
-    data = request.get_json()
-    peer_id = data.get('node_id', str(uuid.uuid4()))  # Generate ID if not provided
-    address = data['address']
+    # Get current config
+    c.execute("SELECT * FROM config")
+    config = {row[0]: row[1] for row in c.fetchall()}
     
-    # Parse address
-    if '://' in address:  # Has protocol
-        # Handle protocol-based address (for trackers/holepunched peers)
-        netConfig.add_holepunched_peer(peer_id, *parse_protocol_address(address))
-    else:  # Has port
-        # Handle host:port address (for NAT peers)
-        host, port = address.split(':')
-        netConfig.add_nat_peer(peer_id, host, int(port))
+    # Get peer list
+    c.execute("SELECT id, address, last_seen, status FROM peers")
+    peers = [{
+        'id': row[0],
+        'address': row[1],
+        'last_seen': time.ctime(row[2]),
+        'status': row[3]
+    } for row in c.fetchall()]
     
-    return jsonify({'status': 'success', 'peer_id': peer_id})
-
-# @app.route('/peers/register', methods=['POST'])
-# def register_peer():
-#     """
-#     The endpoint for a new node to join the network.
-#     A new node announces itself to an existing node.
-#     """
-#     data = request.get_json()
-#     peer_id = data.get('node_id')
-#     peer_address = data.get('address')
-
-#     if not peer_id or not peer_address:
-#         return "Invalid data", 400
-
-#     if peer_id == NODE_ID: # Don't add self
-#         return "Cannot register self", 200
-
-#     response_for_new_peer = {
-#         "message": "Peer registered successfully.",
-#         "known_peers": PEERS.copy()
-#     }
-#     response_for_new_peer['known_peers'][NODE_ID] = f"http://{NODE_HOST}:{NODE_PORT}"
-
-#     PEERS[peer_id] = peer_address
-#     print(f"[{NODE_PORT}] Registered new peer: {peer_id} at {peer_address}")
-
-#     for existing_peer_id, existing_peer_address in response_for_new_peer['known_peers'].items():
-#         if existing_peer_id != NODE_ID: 
-#             try:
-#                 print(f"[{NODE_PORT}] Announcing new peer {peer_id} to {existing_peer_address}")
-#                 requests.post(f"{existing_peer_address}/peers/announce", json={'node_id': peer_id, 'address': peer_address})
-#             except requests.exceptions.ConnectionError:
-#                 print(f"[{NODE_PORT}] Could not connect to peer {existing_peer_address} to announce.")
-
-#     return jsonify(response_for_new_peer)
-
-@app.route('/peers/announce', methods=['POST'])
-def announce_peer():
-    """An internal endpoint for peers to announce other peers they discovered."""
-    data = request.get_json()
-    peer_id = data.get('node_id')
-    peer_address = data.get('address')
-
-    if not peer_id or not peer_address:
-        return "Invalid data", 400
-
-    if peer_id not in PEERS and peer_id != NODE_ID:
-        PEERS[peer_id] = peer_address
-        print(f"[{NODE_PORT}] Learned about peer {peer_id} from another node.")
-
-    return "OK", 200
-
-@app.route('/data', methods=['POST'])
-def add_data():
-    """
-    Adds a new piece of data from a raw POST request (e.g., from an API client).
-    The node stores it locally. Replication is handled by the background loop.
-    """
-    content = request.get_data() # get as bytes
-    if not content:
-        return "No data provided", 400
-
-    key = get_data_key(content)
-    
-    # Store the data locally
-    save_data_local(key, content)
-
-    # Replication is now handled by the data_replication_loop, not immediately.
-    return jsonify({"message": "Data stored locally. It will be replicated to the network over time.", "key": key}), 201
-
-
-@app.route('/data/replicate', methods=['POST'])
-def replicate_data():
-    """An internal endpoint for a node to receive a replica from another node."""
-    data = request.get_json()
-    key = data.get('key')
-    content = data.get('content')
-    save_data_local(key, content)
-    return "Replica stored", 200
-
-
-@app.route('/data/<key>', methods=['GET'])
-def get_data(key):
-    """
-    API endpoint to retrieve data. Checks locally, then asks peers.
-    """
-    content = find_data_in_network(key)
-    if content:
-        return content, 200
-    else:
-        return "Data not found in the network", 404
-
-
-# --- Main Execution ---
+    conn.close()
+    return render_template('settings.html', config=config, peers=peers)
 
 if __name__ == '__main__':
-    if len(sys.argv) < 2:
-        print("Usage: python app.py <port> [bootstrap_address]")
-        sys.exit(1)
-
-    NODE_PORT = int(sys.argv[1])
-    
-    netConfig.nat_type = netConfig.get_nat_type()
-    print(f"NAT Type: {netConfig.nat_type}")
-    
-    threading.Thread(target=udp_server_thread, daemon=True).start()
-    
-    threading.Thread(target=lambda: app.run(
-        host=NODE_HOST, 
-        port=NODE_PORT,
-        threaded=True
-    ), daemon=True).start()
-    
-    tracker_nodes = netConfig.get_nodes_from_tracker()
-    for node_id, node_address in tracker_nodes:
-        if node_id != NODE_ID and node_id not in PEERS:
-            PEERS[node_id] = node_address
-            Config.add_peer(node_id, node_address)
-            print(f"[{NODE_PORT}] Added node from tracker: {node_id} at {node_address}")
-    
-    if len(sys.argv) > 2:
-        bootstrap_address = sys.argv[2]
-        print(f"Attempting NAT traversal with bootstrap node...")
-        
-        if netConfig.public_udp_addr:
-            host, port = bootstrap_address.split(':')
-            try:
-                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-                    sock.sendto(b"REGISTER_UDP", (host, int(port)))
-            except Exception as e:
-                print(f"UDP bootstrap failed: {e}")
-        
-        try:
-            my_address = f"{NODE_HOST}:{NODE_PORT}"
-            response = requests.post(f"http://{bootstrap_address}/peers/register", 
-                                   json={'node_id': NODE_ID, 'address': my_address},
-                                   timeout=5)
-            if response.status_code == 200:
-                known_peers_data = response.json().get('known_peers', {})
-                PEERS.update(known_peers_data)
-        except requests.exceptions.RequestException as e:
-            print(f"TCP bootstrap failed: {e}")
-
-    # Start maintenance threads
-    netConfig.start_background_tasks()
-    threading.Thread(target=data_replication_loop, daemon=True).start() # Start the new replication loop
-    
-    print(f"Node {NODE_ID} started on http://{NODE_HOST}:{NODE_PORT}")
-    
-    # Keep main thread alive
-    try:
-        while True:
-            time.sleep(10000)
-            Config.save_config()
-    except KeyboardInterrupt:
-        print("\nShutting down node...")
-        Config.save_config()
-        sys.exit(0)
+    os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+    app.run(host='0.0.0.0', port=5000, threaded=True)
