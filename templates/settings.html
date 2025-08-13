@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+
+{% block content %}
+    <h1 class="mb-4">Node Settings</h1>
+    
+    <form method="post">
+        <div class="card mb-4">
+            <div class="card-header bg-primary text-white">
+                <h5 class="mb-0">Resource Limits</h5>
+            </div>
+            <div class="card-body">
+                <div class="mb-3">
+                    <label for="max_storage" class="form-label">Max Storage (bytes)</label>
+                    <input type="number" class="form-control" id="max_storage" name="max_storage" 
+                           value="{{ config['max_storage'] }}">
+                </div>
+                <div class="mb-3">
+                    <label for="max_bandwidth" class="form-label">Max Bandwidth (bytes per second)</label>
+                    <input type="number" class="form-control" id="max_bandwidth" name="max_bandwidth" 
+                           value="{{ config['max_bandwidth'] }}">
+                </div>
+            </div>
+        </div>
+        
+        <div class="card mb-4">
+            <div class="card-header bg-primary text-white">
+                <h5 class="mb-0">Peer Management</h5>
+            </div>
+            <div class="card-body">
+                <table class="table">
+                    <thead>
+                        <tr>
+                            <th>Peer ID</th>
+                            <th>Address</th>
+                            <th>Last Seen</th>
+                            <th>Status</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for peer in peers %}
+                        <tr>
+                            <td>{{ peer.id[:8] }}...</td>
+                            <td>{{ peer.address }}</td>
+                            <td>{{ peer.last_seen }}</td>
+                            <td>
+                                <select class="form-select" name="peer_status_{{ peer.id }}">
+                                    <option value="friend" {% if peer.status == 'friend' %}selected{% endif %}>Friend</option>
+                                    <option value="stranger" {% if peer.status == 'stranger' %}selected{% endif %}>Stranger</option>
+                                    <option value="blocked" {% if peer.status == 'blocked' %}selected{% endif %}>Blocked</option>
+                                </select>
+                            </td>
+                        </tr>
+                        {% else %}
+                        <tr>
+                            <td colspan="4" class="text-center">No peers found</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        
+        <button type="submit" class="btn btn-primary">Save Settings</button>
+    </form>
+{% endblock %}

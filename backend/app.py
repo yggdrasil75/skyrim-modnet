@@ -1,17 +1,15 @@
 import os
 import hashlib
-import math
 import sqlite3
 import threading
 import time
 import uuid
 from flask import Flask, render_template, request, send_file, redirect, url_for
 from werkzeug.utils import secure_filename
-import py7zr
 from PIL import Image
 import io
 
-app = Flask(__name__)
+app = Flask(__name__, template_folder='../templates')
 app.config['UPLOAD_FOLDER'] = 'uploads'
 app.config['CHUNK_SIZE'] = 1024 * 1024 * 5  # 5MB chunks
 app.config['MAX_STORAGE'] = 1024 * 1024 * 1024  # 1GB default
@@ -28,7 +26,7 @@ def init_db():
     c.execute('''CREATE TABLE IF NOT EXISTS mods
                  (id TEXT PRIMARY KEY, title TEXT, short_desc TEXT, 
                  long_desc TEXT, author TEXT, image_hash TEXT, 
-                 timestamp REAL, chunk_count INTEGER)''')
+                 timestamp REAL, chunk_count INTEGER, downloads INTEGER DEFAULT 0)''')
     
     # File chunks
     c.execute('''CREATE TABLE IF NOT EXISTS chunks
@@ -112,9 +110,9 @@ def process_upload(file, title, short_desc, long_desc, image_file=None):
     # Store mod metadata
     conn = sqlite3.connect(app.config['DATABASE'])
     c = conn.cursor()
-    c.execute("INSERT INTO mods VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    c.execute("INSERT INTO mods VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
               (mod_id, title, short_desc, long_desc, "User", 
-               image_hash, time.time(), chunk_count))
+               image_hash, time.time(), chunk_count, 0))
     
     # Associate chunks with mod
     for chunk_hash in chunk_hashes:
@@ -148,12 +146,10 @@ def replicate_mod(mod_id):
     
     conn.close()
     
-    # Distribute to peers (simplified)
+    # Distribute to peers
     for peer_id, address in peers:
         try:
-            # In real implementation: Send mod metadata and chunks to peer
             print(f"Replicating {mod_id} to {address}")
-            # This would use network transmission with throttling
         except:
             print(f"Failed to replicate to {address}")
 
@@ -169,7 +165,7 @@ def manage_peers():
                   (time.time() - 604800,))  # 1 week
         
         # Replicate popular mods
-        c.execute("SELECT id FROM mods ORDER BY timestamp DESC LIMIT 10")
+        c.execute("SELECT id FROM mods ORDER BY downloads DESC LIMIT 10")
         popular_mods = [row[0] for row in c.fetchall()]
         
         for mod_id in popular_mods:
@@ -188,15 +184,57 @@ def index():
     """Show available mods"""
     conn = sqlite3.connect(app.config['DATABASE'])
     c = conn.cursor()
-    c.execute("SELECT id, title, short_desc, image_hash FROM mods")
+    c.execute("SELECT id, title, short_desc, image_hash, downloads FROM mods ORDER BY timestamp DESC LIMIT 20")
     mods = [{
         'id': row[0],
         'title': row[1],
         'desc': row[2],
-        'image': row[3]
+        'image': row[3],
+        'downloads': row[4]
     } for row in c.fetchall()]
     conn.close()
     return render_template('index.html', mods=mods)
+
+@app.route('/search')
+def search():
+    """Search mods by title or description"""
+    query = request.args.get('q', '')
+    conn = sqlite3.connect(app.config['DATABASE'])
+    c = conn.cursor()
+    
+    if query:
+        c.execute("SELECT id, title, short_desc, image_hash, downloads FROM mods WHERE title LIKE ? OR short_desc LIKE ?",
+                  (f'%{query}%', f'%{query}%'))
+    else:
+        c.execute("SELECT id, title, short_desc, image_hash, downloads FROM mods ORDER BY downloads DESC LIMIT 50")
+    
+    mods = [{
+        'id': row[0],
+        'title': row[1],
+        'desc': row[2],
+        'image': row[3],
+        'downloads': row[4]
+    } for row in c.fetchall()]
+    
+    conn.close()
+    return render_template('search.html', mods=mods, query=query)
+
+@app.route('/chunk/<chunk_hash>')
+def serve_chunk(chunk_hash):
+    """Serve a chunk (for images)"""
+    conn = sqlite3.connect(app.config['DATABASE'])
+    c = conn.cursor()
+    c.execute("SELECT data FROM chunks WHERE hash = ?", (chunk_hash,))
+    chunk = c.fetchone()
+    conn.close()
+    
+    if not chunk:
+        return "Chunk not found", 404
+    
+    return send_file(
+        io.BytesIO(chunk[0]),
+        mimetype='image/jpeg'
+    )
 
 @app.route('/mod/<mod_id>')
 def mod_page(mod_id):
@@ -216,7 +254,9 @@ def mod_page(mod_id):
         'long_desc': mod[3],
         'author': mod[4],
         'image': mod[5],
-        'date': time.ctime(mod[6])
+        'date': time.ctime(mod[6]),
+        'chunk_count': mod[7],
+        'downloads': mod[8]
     }
     
     # Get peer availability
@@ -239,6 +279,10 @@ def download_mod(mod_id):
     if not chunks:
         return "Mod not available", 404
     
+    # Update download count
+    c.execute("UPDATE mods SET downloads = downloads + 1 WHERE id = ?", (mod_id,))
+    conn.commit()
+    
     # Reassemble file
     full_file = b''.join(chunks)
     conn.close()
@@ -248,7 +292,7 @@ def download_mod(mod_id):
         io.BytesIO(full_file),
         mimetype='application/octet-stream',
         as_attachment=True,
-        download_name=f"{mod_id[:8]}.7z"
+        download_name=f"{mod_id[:8]}.bin"
     )
 
 @app.route('/upload', methods=['GET', 'POST'])
