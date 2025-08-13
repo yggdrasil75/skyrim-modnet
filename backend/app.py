@@ -8,14 +8,65 @@ from flask import Flask, render_template, request, send_file, redirect, url_for
 from werkzeug.utils import secure_filename
 from PIL import Image
 import io
+import json
 
 app = Flask(__name__, template_folder='../templates')
-app.config['UPLOAD_FOLDER'] = 'uploads'
-app.config['CHUNK_SIZE'] = 1024 * 1024 * 5  # 5MB chunks
-app.config['MAX_STORAGE'] = 1024 * 1024 * 1024  # 1GB default
-app.config['NETWORK_THROTTLE'] = 1024 * 1024  # 1MB/s
-app.config['DATABASE'] = 'node.db'
-app.config['NODE_ID'] = str(uuid.uuid4())
+
+# Default configuration
+DEFAULT_CONFIG = {
+    'UPLOAD_FOLDER': 'uploads',
+    'CHUNK_SIZE': 1024 * 1024 * 5,  # 5MB chunks
+    'MAX_STORAGE': 1024 * 1024 * 1024,  # 1GB default
+    'NETWORK_THROTTLE': 1024 * 1024,  # 1MB/s
+    'DATABASE': 'node.db',
+    'NODE_ID': None,  # Will be generated or loaded
+    'CONFIG_FILE': 'node_config.json'
+}
+
+def load_or_create_config():
+    """Load configuration from file or create new one"""
+    config = DEFAULT_CONFIG.copy()
+    
+    try:
+        if os.path.exists(config['CONFIG_FILE']):
+            with open(config['CONFIG_FILE'], 'r') as f:
+                saved_config = json.load(f)
+                # Update with saved values, but keep defaults for missing keys
+                config.update(saved_config)
+        else:
+            # Generate new node ID if this is first run
+            config['NODE_ID'] = str(uuid.uuid4())
+            # Save the new configuration
+            with open(config['CONFIG_FILE'], 'w') as f:
+                json.dump(config, f, indent=2)
+    except Exception as e:
+        print(f"Error loading config: {e}")
+        # If there's an error, use defaults and generate new ID
+        config['NODE_ID'] = str(uuid.uuid4())
+    
+    return config
+
+# Load configuration
+app.config.update(load_or_create_config())
+
+def save_config():
+    """Save current configuration to file"""
+    try:
+        # Only save the persistent settings
+        persistent_config = {
+            'UPLOAD_FOLDER': app.config['UPLOAD_FOLDER'],
+            'CHUNK_SIZE': app.config['CHUNK_SIZE'],
+            'MAX_STORAGE': app.config['MAX_STORAGE'],
+            'NETWORK_THROTTLE': app.config['NETWORK_THROTTLE'],
+            'DATABASE': app.config['DATABASE'],
+            'NODE_ID': app.config['NODE_ID'],
+            'CONFIG_FILE': app.config['CONFIG_FILE']
+        }
+        
+        with open(app.config['CONFIG_FILE'], 'w') as f:
+            json.dump(persistent_config, f, indent=2)
+    except Exception as e:
+        print(f"Error saving config: {e}")
 
 # Initialize database
 def init_db():
@@ -193,7 +244,7 @@ def index():
         'downloads': row[4]
     } for row in c.fetchall()]
     conn.close()
-    return render_template('index.html', mods=mods)
+    return render_template('index.html', mods=mods, config=app.config)
 
 @app.route('/search')
 def search():
@@ -324,6 +375,11 @@ def settings():
         max_storage = int(request.form['max_storage'])
         max_bandwidth = int(request.form['max_bandwidth'])
         
+        # Update in-memory config
+        app.config['MAX_STORAGE'] = max_storage
+        app.config['NETWORK_THROTTLE'] = max_bandwidth
+        
+        # Update database config
         c.execute("UPDATE config SET value = ? WHERE key = 'max_storage'", 
                   (str(max_storage),))
         c.execute("UPDATE config SET value = ? WHERE key = 'max_bandwidth'", 
@@ -338,6 +394,9 @@ def settings():
                           (new_status, peer_id))
         
         conn.commit()
+        
+        # Save the updated configuration
+        save_config()
     
     # Get current config
     c.execute("SELECT * FROM config")
@@ -353,7 +412,7 @@ def settings():
     } for row in c.fetchall()]
     
     conn.close()
-    return render_template('settings.html', config=config, peers=peers)
+    return render_template('settings.html', config=app.config, peers=peers)
 
 if __name__ == '__main__':
     os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
