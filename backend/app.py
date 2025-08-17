@@ -25,6 +25,7 @@ app.config['ALLOWED_EXTENSIONS'] = {'zip', 'rar', '7z', 'mod', 'jar'}
 app.config['PEERS'] = set()  # Set to store peer addresses
 app.config['DEFAULT_PEERS'] = {'http://www.themoddingtree.com'}  # Default peers
 def get_persistent_node_id():
+    os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
     node_id_file = os.path.join(app.config['UPLOAD_FOLDER'], 'node_id')
     try:
         with open(node_id_file, 'r') as f:
