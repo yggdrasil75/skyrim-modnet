@@ -10,6 +10,13 @@ from werkzeug.utils import secure_filename
 
 app = Flask(__name__, template_folder="../templates")
 
+app.config['PEER_TYPES'] = {
+    'friends': set(),      # Prioritized connections
+    'peers': set(),        # Standard semi-permanent connections
+    'strangers': set(),    # Limited connections
+    'enemies': set()       # Blocked connections
+}
+
 # Configuration
 app.config['UPLOAD_FOLDER'] = './uploads'
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024 * 1024  # 16MB max
@@ -78,6 +85,7 @@ def init_db():
         cursor.execute('''
         CREATE TABLE IF NOT EXISTS peers (
             peer_address TEXT PRIMARY KEY,
+            peer_type TEXT NOT NULL CHECK(peer_type IN ('friend', 'peer', 'stranger', 'enemy')),
             last_seen DATETIME DEFAULT CURRENT_TIMESTAMP
         )
         ''')
@@ -225,6 +233,122 @@ def get_shared_files():
         ''')
         return cursor.fetchall()
 
+# Update the peer loading function
+def load_peers_from_db():
+    """Load known peers from database at startup and categorize them"""
+    with app.app_context():
+        db = get_db()
+        cursor = db.cursor()
+        cursor.execute('SELECT peer_address, peer_type FROM peers')
+        
+        # Clear all peer sets
+        for peer_type in current_app.config['PEER_TYPES']:
+            current_app.config['PEER_TYPES'][peer_type].clear()
+        
+        # Add peers from database to their respective sets
+        for row in cursor.fetchall():
+            peer_type = row['peer_type'] + 's'  # Convert to plural form
+            if peer_type in current_app.config['PEER_TYPES']:
+                current_app.config['PEER_TYPES'][peer_type].add(row['peer_address'])
+        
+        # Add default peers as regular peers if they're not already present
+        for peer in current_app.config['DEFAULT_PEERS']:
+            if not any(peer in peers for peers in current_app.config['PEER_TYPES'].values()):
+                current_app.config['PEER_TYPES']['peers'].add(peer)
+                try:
+                    cursor.execute(
+                        'INSERT OR IGNORE INTO peers (peer_address, peer_type) VALUES (?, ?)',
+                        (peer, 'peer')
+                    )
+                    db.commit()
+                except sqlite3.Error as e:
+                    print(f"Error adding default peer to database: {e}")
+
+# New function to categorize a peer
+def categorize_peer(peer_address, peer_type):
+    """Categorize a peer into one of the types"""
+    valid_types = ['friend', 'peer', 'stranger', 'enemy']
+    if peer_type not in valid_types:
+        raise ValueError(f"Invalid peer type. Must be one of {valid_types}")
+    
+    with app.app_context():
+        # Remove from all categories first
+        for pt in current_app.config['PEER_TYPES']:
+            if peer_address in current_app.config['PEER_TYPES'][pt]:
+                current_app.config['PEER_TYPES'][pt].remove(peer_address)
+        
+        # Add to the specified category
+        plural_type = peer_type + 's'
+        if plural_type in current_app.config['PEER_TYPES']:
+            current_app.config['PEER_TYPES'][plural_type].add(peer_address)
+        
+        # Update database
+        db = get_db()
+        cursor = db.cursor()
+        cursor.execute(
+            'INSERT OR REPLACE INTO peers (peer_address, peer_type) VALUES (?, ?)',
+            (peer_address, peer_type)
+        )
+        db.commit()
+
+# Updated add_peer endpoint with type specification
+@app.route('/add_peer', methods=['POST'])
+def add_peer():
+    peer_address = request.form.get('peer_address')
+    peer_type = request.form.get('peer_type', 'peer')  # Default to 'peer'
+    
+    if not peer_address:
+        return "Invalid peer address", 400
+        
+    # Ensure the peer address has http:// prefix if not present
+    if not peer_address.startswith(('http://', 'https://')):
+        peer_address = f"http://{peer_address}"
+        
+    # Remove trailing slash if present
+    peer_address = peer_address.rstrip('/')
+    
+    # Don't allow modification of default peers
+    if peer_address in current_app.config['DEFAULT_PEERS']:
+        return "Cannot modify default peers", 400
+    
+    try:
+        categorize_peer(peer_address, peer_type)
+        
+        # Notify the new peer about our existence (only if friend or peer)
+        if peer_type in ['friend', 'peer']:
+            try:
+                our_address = request.host_url.rstrip('/')
+                if not our_address.startswith('http'):
+                    our_address = f"http://{our_address}"
+                requests.post(f"{peer_address}/add_peer", 
+                             json={
+                                 'peer_address': our_address,
+                                 'peer_type': 'peer'  # Default to peer when notifying
+                             },
+                             timeout=2)
+            except requests.exceptions.RequestException as e:
+                print(f"Failed to notify peer {peer_address}: {e}")
+            
+        return redirect(url_for('index'))
+    except ValueError as e:
+        return str(e), 400
+
+# API endpoint to change peer type
+@app.route('/set_peer_type', methods=['POST'])
+def set_peer_type():
+    peer_address = request.form.get('peer_address')
+    peer_type = request.form.get('peer_type')
+    
+    if not peer_address or not peer_type:
+        return "Missing parameters", 400
+    
+    try:
+        categorize_peer(peer_address, peer_type)
+        return redirect(url_for('index'))
+    except ValueError as e:
+        return str(e), 400
+
+# Updated maintenance check to prioritize friends
 def maintenance_check():
     """Periodically check file health and redistribute as needed"""
     with app.app_context():
@@ -232,8 +356,12 @@ def maintenance_check():
             time.sleep(current_app.config['MAINTENANCE_INTERVAL'])
             print(f"[{datetime.now()}] Running maintenance check...")
             
-            # Make a copy of peers to avoid modification during iteration
-            peers = list(current_app.config['PEERS'])
+            # Get all peers in priority order: friends first, then peers, then strangers
+            all_peers = (
+                list(current_app.config['PEER_TYPES']['friends']) +
+                list(current_app.config['PEER_TYPES']['peers']) +
+                list(current_app.config['PEER_TYPES']['strangers'])
+            )
             
             # Check each file's health
             db = get_db()
@@ -258,12 +386,12 @@ def maintenance_check():
                         print(f"File {file_name} needs more hosts (only {host_count})")
                         # Find peers that don't have this file yet
                         candidates = []
-                        for peer in peers:
+                        for peer in all_peers:
                             peer_id = peer.split('//')[-1].replace(':', '_')  # Create a simple ID from the peer address
                             if peer_id not in hosts:
                                 candidates.append(peer)
                         
-                        # Share with enough peers to reach minimum
+                        # Share with enough peers to reach minimum, prioritizing friends
                         needed = min(3 - host_count, len(candidates))
                         for i in range(needed):
                             peer = candidates[i]
@@ -323,31 +451,32 @@ def maintenance_check():
                 except Exception as e:
                     print(f"Error during maintenance for {file_name}: {str(e)}")
             
-            # Check for new files from peers
-            for peer in peers:
-                try:
-                    files_url = f"{peer}/shared_files"
-                    print(f"Checking for new files at {files_url}")
-                    response = requests.get(files_url, timeout=2)
-                    if response.status_code == 200:
-                        peer_files = response.json()
-                        for file_hash, file_info in peer_files.items():
-                            # Check if we already know about this file
-                            cursor.execute(
-                                'SELECT 1 FROM files WHERE file_hash = ?',
-                                (file_hash,)
-                            )
-                            if not cursor.fetchone():
-                                # New file discovered
+            # Check for new files from peers (only friends and regular peers)
+            for peer_type in ['friends', 'peers']:
+                for peer in current_app.config['PEER_TYPES'][peer_type]:
+                    try:
+                        files_url = f"{peer}/shared_files"
+                        print(f"Checking for new files at {files_url}")
+                        response = requests.get(files_url, timeout=2)
+                        if response.status_code == 200:
+                            peer_files = response.json()
+                            for file_hash, file_info in peer_files.items():
+                                # Check if we already know about this file
                                 cursor.execute(
-                                    'INSERT INTO files (file_hash, name, size, owner) VALUES (?, ?, ?, ?)',
-                                    (file_hash, file_info['name'], file_info['size'], file_info['owner'])
+                                    'SELECT 1 FROM files WHERE file_hash = ?',
+                                    (file_hash,)
                                 )
-                                db.commit()
-                                print(f"Discovered new file from {peer}: {file_info['name']}")
-                except requests.exceptions.RequestException as e:
-                    print(f"Failed to check for files from {peer}: {str(e)}")
-                    continue
+                                if not cursor.fetchone():
+                                    # New file discovered
+                                    cursor.execute(
+                                        'INSERT INTO files (file_hash, name, size, owner) VALUES (?, ?, ?, ?)',
+                                        (file_hash, file_info['name'], file_info['size'], file_info['owner'])
+                                    )
+                                    db.commit()
+                                    print(f"Discovered new file from {peer}: {file_info['name']}")
+                    except requests.exceptions.RequestException as e:
+                        print(f"Failed to check for files from {peer}: {str(e)}")
+                        continue
 
 # Routes
 @app.route('/')
@@ -356,7 +485,56 @@ def index():
         files = get_shared_files()
         # Convert SQLite rows to dictionaries
         files_data = {row['file_hash']: dict(row) for row in files}
-        return render_template('index.html', files=files_data, peers=current_app.config['PEERS'])
+        return render_template('index.html', 
+                            files=files_data, 
+                            peer_types=current_app.config['PEER_TYPES'])
+    
+# Updated download function to prioritize friends for chunk retrieval
+def generate_download_stream(file_hash):
+    with app.app_context():
+        # Get all chunks for this file in order
+        cursor = get_db().cursor()
+        cursor.execute(
+            'SELECT chunk_hash FROM chunks WHERE file_hash = ? ORDER BY sequence',
+            (file_hash,)
+        )
+        chunk_hashes = [row['chunk_hash'] for row in cursor.fetchall()]
+        
+        if not chunk_hashes:
+            raise ValueError("No chunks found for this file")
+        
+        for chunk_hash in chunk_hashes:
+            chunk_path = os.path.join(current_app.config['UPLOAD_FOLDER'], f"{chunk_hash}.chunk")
+            
+            # Try local chunk first
+            if os.path.exists(chunk_path):
+                with open(chunk_path, 'rb') as chunk_file:
+                    yield chunk_file.read()
+                continue
+                
+            # Try to fetch chunk from peers - friends first, then peers, then strangers
+            chunk_found = False
+            for peer_type in ['friends', 'peers', 'strangers']:
+                for peer in current_app.config['PEER_TYPES'][peer_type]:
+                    try:
+                        response = requests.get(f"{peer}/chunk/{chunk_hash}", stream=True, timeout=5)
+                        if response.status_code == 200:
+                            for chunk in response.iter_content(chunk_size=8192):
+                                yield chunk
+                            # Save chunk locally for future requests
+                            chunk_path = os.path.join(current_app.config['UPLOAD_FOLDER'], f"{chunk_hash}.chunk")
+                            with open(chunk_path, 'wb') as f:
+                                response.raw.decode_content = True
+                                f.write(response.raw.read())
+                            chunk_found = True
+                            break
+                    except requests.exceptions.RequestException:
+                        continue
+                if chunk_found:
+                    break
+            
+            if not chunk_found:
+                raise FileNotFoundError(f"Missing chunk {chunk_hash} for file {file_hash}")
 
 @app.route('/upload', methods=['POST'])
 def upload_file():
@@ -423,65 +601,31 @@ def download_file(file_hash):
         file_info = cursor.fetchone()
         
         if not file_info:
-            # Check if any peers have this file
-            for peer in current_app.config['PEERS']:
-                try:
-                    response = requests.get(f"{peer}/file_info/{file_hash}")
-                    if response.status_code == 200:
-                        file_data = response.json()
-                        # Store the file info in our database
-                        cursor.execute(
-                            'INSERT INTO files (file_hash, name, size, owner) VALUES (?, ?, ?, ?)',
-                            (file_hash, file_data['name'], file_data['size'], file_data['owner'])
-                        )
-                        db.commit()
-                        file_info = {'name': file_data['name'], 'size': file_data['size']}
-                        break
-                except requests.exceptions.RequestException:
-                    continue
-            else:
-                return "File not found", 404
-
-    def generate():
-        with app.app_context():
-            # Get all chunks for this file in order
-            cursor = get_db().cursor()
-            cursor.execute(
-                'SELECT chunk_hash FROM chunks WHERE file_hash = ? ORDER BY sequence',
-                (file_hash,)
-            )
-            chunk_hashes = [row['chunk_hash'] for row in cursor.fetchall()]
-            
-            if not chunk_hashes:
-                raise ValueError("No chunks found for this file")
-            
-            for chunk_hash in chunk_hashes:
-                chunk_path = os.path.join(current_app.config['UPLOAD_FOLDER'], f"{chunk_hash}.chunk")
-                
-                # Try local chunk first
-                if os.path.exists(chunk_path):
-                    with open(chunk_path, 'rb') as chunk_file:
-                        yield chunk_file.read()
-                    continue
-                    
-                # Try to fetch chunk from peers
-                chunk_found = False
-                for peer in current_app.config['PEERS']:
+            # Check if any peers have this file (friends first)
+            for peer_type in ['friends', 'peers', 'strangers']:
+                for peer in current_app.config['PEER_TYPES'][peer_type]:
                     try:
-                        response = requests.get(f"{peer}/chunk/{chunk_hash}", stream=True, timeout=5)
+                        response = requests.get(f"{peer}/file_info/{file_hash}")
                         if response.status_code == 200:
-                            for chunk in response.iter_content(chunk_size=8192):
-                                yield chunk
-                            chunk_found = True
+                            file_data = response.json()
+                            # Store the file info in our database
+                            cursor.execute(
+                                'INSERT INTO files (file_hash, name, size, owner) VALUES (?, ?, ?, ?)',
+                                (file_hash, file_data['name'], file_data['size'], file_data['owner'])
+                            )
+                            db.commit()
+                            file_info = {'name': file_data['name'], 'size': file_data['size']}
                             break
                     except requests.exceptions.RequestException:
                         continue
-                
-                if not chunk_found:
-                    raise FileNotFoundError(f"Missing chunk {chunk_hash} for file {file_hash}")
+                else:
+                    continue
+                break
+            else:
+                return "File not found", 404
 
     response = Response(
-        generate(),
+        generate_download_stream(file_hash),
         mimetype='application/octet-stream',
         headers={
             'Content-Disposition': f'attachment; filename="{file_info["name"]}"',
@@ -490,50 +634,6 @@ def download_file(file_hash):
     )
     
     return response
-
-@app.route('/add_peer', methods=['POST'])
-def add_peer():
-    peer_address = request.form.get('peer_address')
-    if not peer_address:
-        return "Invalid peer address", 400
-        
-    # Ensure the peer address has http:// prefix if not present
-    if not peer_address.startswith(('http://', 'https://')):
-        peer_address = f"http://{peer_address}"
-        
-    # Remove trailing slash if present
-    peer_address = peer_address.rstrip('/')
-    
-    # Don't allow modification of default peers
-    if peer_address in current_app.config['DEFAULT_PEERS']:
-        return "Cannot modify default peers", 400
-    
-    if peer_address not in current_app.config['PEERS']:
-        current_app.config['PEERS'].add(peer_address)
-        
-        # Store peer in database
-        with app.app_context():
-            db = get_db()
-            cursor = db.cursor()
-            cursor.execute(
-                'INSERT OR REPLACE INTO peers (peer_address) VALUES (?)',
-                (peer_address,)
-            )
-            db.commit()
-            
-            # Notify the new peer about our existence
-            try:
-                our_address = request.host_url.rstrip('/')
-                if not our_address.startswith('http'):
-                    our_address = f"http://{our_address}"
-                requests.post(f"{peer_address}/add_peer", 
-                             json={'peer_address': our_address},
-                             timeout=2)
-            except requests.exceptions.RequestException as e:
-                print(f"Failed to notify peer {peer_address}: {e}")
-            
-            return redirect(url_for('index'))
-    return "Invalid peer address", 400
 
 @app.route('/register_file', methods=['POST'])
 def register_file():
@@ -635,31 +735,6 @@ def start_maintenance_thread():
     thread = threading.Thread(target=maintenance_check)
     thread.daemon = True
     thread.start()
-
-def load_peers_from_db():
-    """Load known peers from database at startup and add default peers"""
-    with app.app_context():
-        db = get_db()
-        cursor = db.cursor()
-        cursor.execute('SELECT peer_address FROM peers')
-        
-        # Add peers from database
-        for row in cursor.fetchall():
-            current_app.config['PEERS'].add(row['peer_address'])
-        
-        # Add default peers if they're not already present
-        for peer in current_app.config['DEFAULT_PEERS']:
-            if peer not in current_app.config['PEERS']:
-                current_app.config['PEERS'].add(peer)
-                try:
-                    # Try to add the peer to the database as well
-                    cursor.execute(
-                        'INSERT OR IGNORE INTO peers (peer_address) VALUES (?)',
-                        (peer,)
-                    )
-                    db.commit()
-                except sqlite3.Error as e:
-                    print(f"Error adding default peer to database: {e}")
 
 if __name__ == '__main__':
     # Create upload directory if it doesn't exist
