@@ -14,17 +14,11 @@
             color: #333;
             text-align: center;
         }
-        .upload-section {
+        .upload-section, .peer-section, .file-list {
             background: white;
             padding: 20px;
             border-radius: 5px;
             margin-bottom: 20px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        }
-        .file-list {
-            background: white;
-            padding: 20px;
-            border-radius: 5px;
             box-shadow: 0 2px 4px rgba(0,0,0,0.1);
         }
         table {
@@ -50,6 +44,15 @@
         button:hover {
             background-color: #45a049;
         }
+        .peer-list {
+            margin-top: 10px;
+        }
+        .peer-list li {
+            margin-bottom: 5px;
+            padding: 5px;
+            background-color: #f9f9f9;
+            border-radius: 3px;
+        }
     </style>
 </head>
 <body>
@@ -62,6 +65,26 @@
             <button type="submit">Upload</button>
         </form>
         <p>Allowed formats: ZIP, RAR, 7Z, MOD, JAR</p>
+    </div>
+
+    <div class="peer-section">
+        <h2>Network Peers</h2>
+        <form method="post" action="/add_peer">
+            <input type="text" name="peer_address" placeholder="http://peer-address:port" required>
+            <button type="submit">Add Peer</button>
+        </form>
+        {% if peers %}
+        <div class="peer-list">
+            <h3>Connected Peers:</h3>
+            <ul>
+                {% for peer in peers %}
+                <li>{{ peer }}</li>
+                {% endfor %}
+            </ul>
+        </div>
+        {% else %}
+        <p>No peers connected yet. Add a peer to join the network.</p>
+        {% endif %}
     </div>
     
     <div class="file-list">
