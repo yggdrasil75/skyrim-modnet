@@ -220,6 +220,9 @@ def maintenance_check():
             time.sleep(current_app.config['MAINTENANCE_INTERVAL'])
             print(f"[{datetime.now()}] Running maintenance check...")
             
+            # Make a copy of peers to avoid modification during iteration
+            peers = list(current_app.config['PEERS'])
+            
             # Check each file's health
             db = get_db()
             cursor = db.cursor()
@@ -243,8 +246,9 @@ def maintenance_check():
                         print(f"File {file_name} needs more hosts (only {host_count})")
                         # Find peers that don't have this file yet
                         candidates = []
-                        for peer in current_app.config['PEERS']:
-                            if peer not in hosts:
+                        for peer in peers:
+                            peer_id = peer.split('//')[-1].replace(':', '_')  # Create a simple ID from the peer address
+                            if peer_id not in hosts:
                                 candidates.append(peer)
                         
                         # Share with enough peers to reach minimum
@@ -266,42 +270,53 @@ def maintenance_check():
                                 )
                                 file_info['chunks'] = [row['chunk_hash'] for row in cursor.fetchall()]
                                 
-                                requests.post(f"{peer}/register_file", json={
+                                # Ensure the peer URL is properly formatted
+                                register_url = f"{peer}/register_file"
+                                print(f"Sending file info to {register_url}")
+                                response = requests.post(register_url, json={
                                     'file_hash': file_hash,
                                     'file_info': file_info
                                 }, timeout=5)
+                                response.raise_for_status()
                                 
                                 # Then send all chunks
                                 for chunk_hash in file_info['chunks']:
                                     chunk_path = os.path.join(current_app.config['UPLOAD_FOLDER'], f"{chunk_hash}.chunk")
                                     if os.path.exists(chunk_path):
                                         with open(chunk_path, 'rb') as f:
-                                            requests.post(f"{peer}/upload_chunk", files={
+                                            upload_url = f"{peer}/upload_chunk"
+                                            print(f"Sending chunk to {upload_url}")
+                                            response = requests.post(upload_url, files={
                                                 'chunk': (f"{chunk_hash}.chunk", f)
                                             }, timeout=5)
+                                            response.raise_for_status()
                                 
                                 # Register that this peer is now hosting the file
-                                requests.post(f"{peer}/register_hosting", json={
-                                    'file_hash': file_hash
+                                host_url = f"{peer}/register_hosting"
+                                print(f"Registering hosting with {host_url}")
+                                response = requests.post(host_url, json={
+                                    'file_hash': file_hash,
+                                    'node_id': current_app.config['NODE_ID']
                                 }, timeout=2)
+                                response.raise_for_status()
                                 
-                                print(f"Shared {file_name} with {peer}")
+                                print(f"Successfully shared {file_name} with {peer}")
                             except requests.exceptions.RequestException as e:
-                                print(f"Failed to share with {peer}: {e}")
+                                print(f"Failed to share with {peer}: {str(e)}")
                     
                     # If we have too many hosts (more than 10), consider removing our copy
                     elif host_count > 10 and owner == current_app.config['NODE_ID']:
                         print(f"File {file_name} has enough hosts ({host_count}), we can stop hosting")
-                        # In a real implementation, we might remove our copy here
-                        # But for this example, we'll just log it
                 
                 except Exception as e:
-                    print(f"Error during maintenance for {file_name}: {e}")
+                    print(f"Error during maintenance for {file_name}: {str(e)}")
             
             # Check for new files from peers
-            for peer in current_app.config['PEERS']:
+            for peer in peers:
                 try:
-                    response = requests.get(f"{peer}/shared_files", timeout=2)
+                    files_url = f"{peer}/shared_files"
+                    print(f"Checking for new files at {files_url}")
+                    response = requests.get(files_url, timeout=2)
                     if response.status_code == 200:
                         peer_files = response.json()
                         for file_hash, file_info in peer_files.items():
@@ -318,7 +333,8 @@ def maintenance_check():
                                 )
                                 db.commit()
                                 print(f"Discovered new file from {peer}: {file_info['name']}")
-                except requests.exceptions.RequestException:
+                except requests.exceptions.RequestException as e:
+                    print(f"Failed to check for files from {peer}: {str(e)}")
                     continue
 
 # Routes
@@ -466,7 +482,17 @@ def download_file(file_hash):
 @app.route('/add_peer', methods=['POST'])
 def add_peer():
     peer_address = request.form.get('peer_address')
-    if peer_address and peer_address not in current_app.config['PEERS']:
+    if not peer_address:
+        return "Invalid peer address", 400
+        
+    # Ensure the peer address has http:// prefix if not present
+    if not peer_address.startswith(('http://', 'https://')):
+        peer_address = f"http://{peer_address}"
+        
+    # Remove trailing slash if present
+    peer_address = peer_address.rstrip('/')
+    
+    if peer_address not in current_app.config['PEERS']:
         current_app.config['PEERS'].add(peer_address)
         
         # Store peer in database
@@ -481,9 +507,14 @@ def add_peer():
             
             # Notify the new peer about our existence
             try:
-                requests.post(f"{peer_address}/add_peer", json={'peer_address': request.host_url})
-            except requests.exceptions.RequestException:
-                pass
+                our_address = request.host_url.rstrip('/')
+                if not our_address.startswith('http'):
+                    our_address = f"http://{our_address}"
+                requests.post(f"{peer_address}/add_peer", 
+                             json={'peer_address': our_address},
+                             timeout=2)
+            except requests.exceptions.RequestException as e:
+                print(f"Failed to notify peer {peer_address}: {e}")
             
             return redirect(url_for('index'))
     return "Invalid peer address", 400
