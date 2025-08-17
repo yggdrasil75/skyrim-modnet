@@ -16,6 +16,7 @@ app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024 * 1024  # 16MB max
 app.config['CHUNK_SIZE'] = 256 * 1024  # 256KB chunks
 app.config['ALLOWED_EXTENSIONS'] = {'zip', 'rar', '7z', 'mod', 'jar'}
 app.config['PEERS'] = set()  # Set to store peer addresses
+app.config['DEFAULT_PEERS'] = {'http://www.themoddingtree.com'}  # Default peers
 app.config['NODE_ID'] = hashlib.sha256(os.urandom(32)).hexdigest()[:8]  # Unique node ID
 app.config['MAINTENANCE_INTERVAL'] = 60  # Seconds between maintenance checks
 app.config['DATABASE'] = './database.db'
@@ -492,6 +493,10 @@ def add_peer():
     # Remove trailing slash if present
     peer_address = peer_address.rstrip('/')
     
+    # Don't allow modification of default peers
+    if peer_address in current_app.config['DEFAULT_PEERS']:
+        return "Cannot modify default peers", 400
+    
     if peer_address not in current_app.config['PEERS']:
         current_app.config['PEERS'].add(peer_address)
         
@@ -621,13 +626,29 @@ def start_maintenance_thread():
     thread.start()
 
 def load_peers_from_db():
-    """Load known peers from database at startup"""
+    """Load known peers from database at startup and add default peers"""
     with app.app_context():
         db = get_db()
         cursor = db.cursor()
         cursor.execute('SELECT peer_address FROM peers')
+        
+        # Add peers from database
         for row in cursor.fetchall():
             current_app.config['PEERS'].add(row['peer_address'])
+        
+        # Add default peers if they're not already present
+        for peer in current_app.config['DEFAULT_PEERS']:
+            if peer not in current_app.config['PEERS']:
+                current_app.config['PEERS'].add(peer)
+                try:
+                    # Try to add the peer to the database as well
+                    cursor.execute(
+                        'INSERT OR IGNORE INTO peers (peer_address) VALUES (?)',
+                        (peer,)
+                    )
+                    db.commit()
+                except sqlite3.Error as e:
+                    print(f"Error adding default peer to database: {e}")
 
 if __name__ == '__main__':
     # Create upload directory if it doesn't exist
