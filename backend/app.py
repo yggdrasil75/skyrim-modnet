@@ -526,21 +526,21 @@ def start_maintenance_thread():
 
 def load_peers_from_db():
     """Load known peers from database at startup"""
-    db = get_db()
-    cursor = db.cursor()
-    cursor.execute('SELECT peer_address FROM peers')
-    for row in cursor.fetchall():
-        app.config['PEERS'].add(row['peer_address'])
+    with app.app_context():
+        db = get_db()
+        cursor = db.cursor()
+        cursor.execute('SELECT peer_address FROM peers')
+        for row in cursor.fetchall():
+            app.config['PEERS'].add(row['peer_address'])
 
 if __name__ == '__main__':
     # Create upload directory if it doesn't exist
     os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
     
-    # Initialize database
-    init_db()
-    
-    # Load known peers from database
-    load_peers_from_db()
+    # Initialize database and load peers within application context
+    with app.app_context():
+        init_db()
+        load_peers_from_db()
     
     # Start maintenance thread
     start_maintenance_thread()
