@@ -1,30 +1,89 @@
-{% extends "base.html" %}
-
-{% block content %}
-    <div class="d-flex justify-content-between align-items-center mb-4">
-        <h1>Latest Mods</h1>
-        <a href="/upload" class="btn btn-primary">Upload Mod</a>
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Mod Sharing Network</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+        }
+        .upload-section {
+            background: white;
+            padding: 20px;
+            border-radius: 5px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .file-list {
+            background: white;
+            padding: 20px;
+            border-radius: 5px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        th, td {
+            padding: 8px;
+            text-align: left;
+            border-bottom: 1px solid #ddd;
+        }
+        tr:hover {
+            background-color: #f5f5f5;
+        }
+        button {
+            background-color: #4CAF50;
+            color: white;
+            padding: 6px 12px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+    </style>
+</head>
+<body>
+    <h1>Decentralized Mod Sharing</h1>
+    
+    <div class="upload-section">
+        <h2>Upload a Mod</h2>
+        <form method="post" action="/upload" enctype="multipart/form-data">
+            <input type="file" name="file" required>
+            <button type="submit">Upload</button>
+        </form>
+        <p>Allowed formats: ZIP, RAR, 7Z, MOD, JAR</p>
     </div>
     
-    <div class="row">
-        {% for mod in mods %}
-        <div class="col-md-4 mb-4">
-            <div class="card h-100">
-                {% if mod.image %}
-                    <img src="{{ url_for('serve_chunk', chunk_hash=mod.image) }}" class="card-img-top" alt="{{ mod.title }}">
-                {% else %}
-                    <div class="no-image">No Image</div>
-                {% endif %}
-                <div class="card-body">
-                    <h5 class="card-title">{{ mod.title }}</h5>
-                    <p class="card-text">{{ mod.desc }}</p>
-                </div>
-                <div class="card-footer d-flex justify-content-between">
-                    <small class="text-muted">Downloads: {{ mod.downloads }}</small>
-                    <a href="{{ url_for('mod_page', mod_id=mod.id) }}" class="btn btn-sm btn-outline-primary">Details</a>
-                </div>
-            </div>
-        </div>
-        {% endfor %}
+    <div class="file-list">
+        <h2>Available Mods</h2>
+        {% if files %}
+        <table>
+            <tr>
+                <th>Filename</th>
+                <th>Size</th>
+                <th>Action</th>
+            </tr>
+            {% for file_hash, file_info in files %}
+            <tr>
+                <td>{{ file_info.name }}</td>
+                <td>{{ (file_info.size / 1024 / 1024)|round(2) }} MB</td>
+                <td><a href="/download/{{ file_hash }}"><button>Download</button></a></td>
+            </tr>
+            {% endfor %}
+        </table>
+        {% else %}
+        <p>No mods available yet. Be the first to upload one!</p>
+        {% endif %}
     </div>
-{% endblock %}
+</body>
+</html>
