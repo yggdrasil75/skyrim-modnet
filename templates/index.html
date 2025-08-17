@@ -91,6 +91,7 @@
     </div>
     
     <div class="file-list">
+        <h2>Available Mods <button onclick="location.reload()">Refresh</button></h2>
         <h2>Available Mods</h2>
         {% if files %}
         <table>
@@ -112,7 +113,12 @@
                         {{ (file_info.size / 1024 / 1024)|round(1) }} MB
                     {% endif %}
                 </td>
-                <td>{{ file_info.host_count }}</td>
+                <td>
+                    {{ file_info.host_count }}
+                    {% if file_info.host_count > 0 %}
+                    <small>(including this node)</small>
+                    {% endif %}
+                </td>
                 <td><a href="/download/{{ file_hash }}"><button>Download</button></a></td>
             </tr>
             {% endfor %}
