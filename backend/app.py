@@ -5,7 +5,7 @@ import threading
 import time
 import sqlite3
 from datetime import datetime
-from flask import Flask, render_template, request, redirect, url_for, send_file, jsonify, g
+from flask import Flask, Response, render_template, request, redirect, url_for, send_file, jsonify, g
 from werkzeug.utils import secure_filename
 
 app = Flask(__name__, template_folder="../templates")
@@ -29,48 +29,47 @@ def get_db():
     return db
 
 def init_db():
-    with app.app_context():
-        db = get_db()
-        cursor = db.cursor()
-        
-        # Create tables if they don't exist
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS files (
-            file_hash TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            size INTEGER NOT NULL,
-            owner TEXT NOT NULL,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-        ''')
-        
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS chunks (
-            chunk_hash TEXT PRIMARY KEY,
-            file_hash TEXT NOT NULL,
-            sequence INTEGER NOT NULL,
-            FOREIGN KEY (file_hash) REFERENCES files (file_hash)
-        )
-        ''')
-        
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS hosts (
-            file_hash TEXT NOT NULL,
-            node_id TEXT NOT NULL,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-            PRIMARY KEY (file_hash, node_id),
-            FOREIGN KEY (file_hash) REFERENCES files (file_hash)
-        )
-        ''')
-        
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS peers (
-            peer_address TEXT PRIMARY KEY,
-            last_seen DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-        ''')
-        
-        db.commit()
+    db = get_db()
+    cursor = db.cursor()
+    
+    # Create tables if they don't exist
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS files (
+        file_hash TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        size INTEGER NOT NULL,
+        owner TEXT NOT NULL,
+        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+    ''')
+    
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS chunks (
+        chunk_hash TEXT PRIMARY KEY,
+        file_hash TEXT NOT NULL,
+        sequence INTEGER NOT NULL,
+        FOREIGN KEY (file_hash) REFERENCES files (file_hash)
+    )
+    ''')
+    
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS hosts (
+        file_hash TEXT NOT NULL,
+        node_id TEXT NOT NULL,
+        timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (file_hash, node_id),
+        FOREIGN KEY (file_hash) REFERENCES files (file_hash)
+    )
+    ''')
+    
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS peers (
+        peer_address TEXT PRIMARY KEY,
+        last_seen DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+    ''')
+    
+    db.commit()
 
 def close_db(exception):
     db = getattr(g, '_database', None)
@@ -130,25 +129,38 @@ def reassemble_file(file_hash, output_path):
     )
     chunk_hashes = [row['chunk_hash'] for row in cursor.fetchall()]
     
+    if not chunk_hashes:
+        raise ValueError("No chunks found for this file")
+    
     with open(output_path, 'wb') as outfile:
         for chunk_hash in chunk_hashes:
             chunk_path = os.path.join(app.config['UPLOAD_FOLDER'], f"{chunk_hash}.chunk")
+            
+            # Try local chunk first
             if os.path.exists(chunk_path):
                 with open(chunk_path, 'rb') as chunk_file:
                     outfile.write(chunk_file.read())
-            else:
-                # Try to fetch chunk from peers
-                for peer in app.config['PEERS']:
-                    try:
-                        response = requests.get(f"{peer}/chunk/{chunk_hash}")
-                        if response.status_code == 200:
-                            outfile.write(response.content)
-                            # Save chunk locally for future requests
-                            with open(chunk_path, 'wb') as chunk_file:
-                                chunk_file.write(response.content)
-                            break
-                    except requests.exceptions.RequestException:
-                        continue
+                continue
+                
+            # Try to fetch chunk from peers
+            chunk_found = False
+            for peer in app.config['PEERS']:
+                try:
+                    response = requests.get(f"{peer}/chunk/{chunk_hash}", timeout=5)
+                    if response.status_code == 200:
+                        outfile.write(response.content)
+                        # Save chunk locally for future requests
+                        with open(chunk_path, 'wb') as chunk_file:
+                            chunk_file.write(response.content)
+                        chunk_found = True
+                        break
+                except requests.exceptions.RequestException:
+                    continue
+            
+            if not chunk_found:
+                raise FileNotFoundError(f"Missing chunk {chunk_hash} for file {file_hash}")
+    
+    return True
 
 def broadcast_to_peers(data, endpoint):
     """Broadcast data to all known peers"""
@@ -366,7 +378,7 @@ def download_file(file_hash):
     
     # Check if we have the file in our database
     cursor.execute(
-        'SELECT name FROM files WHERE file_hash = ?',
+        'SELECT name, size FROM files WHERE file_hash = ?',
         (file_hash,)
     )
     file_info = cursor.fetchone()
@@ -384,23 +396,57 @@ def download_file(file_hash):
                         (file_hash, file_data['name'], file_data['size'], file_data['owner'])
                     )
                     db.commit()
-                    file_info = {'name': file_data['name']}
+                    file_info = {'name': file_data['name'], 'size': file_data['size']}
                     break
             except requests.exceptions.RequestException:
                 continue
         else:
             return "File not found", 404
-    
-    temp_path = os.path.join(app.config['UPLOAD_FOLDER'], f"temp_{file_info['name']}")
-    
-    # Reassemble file from chunks
-    reassemble_file(file_hash, temp_path)
-    
-    # Send file to user
-    response = send_file(temp_path, as_attachment=True, download_name=file_info['name'])
-    
-    # Clean up temporary file
-    os.remove(temp_path)
+
+    def generate():
+        # Get all chunks for this file in order
+        cursor.execute(
+            'SELECT chunk_hash FROM chunks WHERE file_hash = ? ORDER BY sequence',
+            (file_hash,)
+        )
+        chunk_hashes = [row['chunk_hash'] for row in cursor.fetchall()]
+        
+        if not chunk_hashes:
+            raise ValueError("No chunks found for this file")
+        
+        for chunk_hash in chunk_hashes:
+            chunk_path = os.path.join(app.config['UPLOAD_FOLDER'], f"{chunk_hash}.chunk")
+            
+            # Try local chunk first
+            if os.path.exists(chunk_path):
+                with open(chunk_path, 'rb') as chunk_file:
+                    yield chunk_file.read()
+                continue
+                
+            # Try to fetch chunk from peers
+            chunk_found = False
+            for peer in app.config['PEERS']:
+                try:
+                    response = requests.get(f"{peer}/chunk/{chunk_hash}", stream=True, timeout=5)
+                    if response.status_code == 200:
+                        for chunk in response.iter_content(chunk_size=8192):
+                            yield chunk
+                        chunk_found = True
+                        break
+                except requests.exceptions.RequestException:
+                    continue
+            
+            if not chunk_found:
+                raise FileNotFoundError(f"Missing chunk {chunk_hash} for file {file_hash}")
+
+    response = Response(
+        generate(),
+        mimetype='application/octet-stream',
+        headers={
+            'Content-Disposition': f'attachment; filename="{file_info["name"]}"',
+            'Content-Length': file_info['size']
+        }
+    )
     
     return response
 
@@ -528,21 +574,19 @@ def start_maintenance_thread():
 
 def load_peers_from_db():
     """Load known peers from database at startup"""
-    with app.app_context():
-        db = get_db()
-        cursor = db.cursor()
-        cursor.execute('SELECT peer_address FROM peers')
-        for row in cursor.fetchall():
-            app.config['PEERS'].add(row['peer_address'])
+    db = get_db()
+    cursor = db.cursor()
+    cursor.execute('SELECT peer_address FROM peers')
+    for row in cursor.fetchall():
+        app.config['PEERS'].add(row['peer_address'])
 
 if __name__ == '__main__':
     # Create upload directory if it doesn't exist
     os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
     
     # Initialize database and load peers within application context
-    with app.app_context():
-        init_db()
-        load_peers_from_db()
+    init_db()
+    load_peers_from_db()
     
     # Start maintenance thread
     start_maintenance_thread()
