@@ -1,0 +1,12 @@
+version: '3.8'
+
+services:
+  modshare:
+    build: .
+    container_name: modshare
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./uploads:/app/uploads
+      - ./database.db:/app/database.db
+    restart: unless-stopped
