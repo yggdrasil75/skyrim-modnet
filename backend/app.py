@@ -17,7 +17,18 @@ app.config['CHUNK_SIZE'] = 256 * 1024  # 256KB chunks
 app.config['ALLOWED_EXTENSIONS'] = {'zip', 'rar', '7z', 'mod', 'jar'}
 app.config['PEERS'] = set()  # Set to store peer addresses
 app.config['DEFAULT_PEERS'] = {'http://www.themoddingtree.com'}  # Default peers
-app.config['NODE_ID'] = hashlib.sha256(os.urandom(32)).hexdigest()[:8]  # Unique node ID
+def get_persistent_node_id():
+    node_id_file = os.path.join(app.config['UPLOAD_FOLDER'], 'node_id')
+    try:
+        with open(node_id_file, 'r') as f:
+            node_id = f.read().strip()
+    except FileNotFoundError:
+        node_id = hashlib.sha256(os.urandom(32)).hexdigest()[:8]
+        with open(node_id_file, 'w') as f:
+            f.write(node_id)
+    return node_id
+
+app.config['NODE_ID'] = get_persistent_node_id()
 app.config['MAINTENANCE_INTERVAL'] = 60  # Seconds between maintenance checks
 app.config['DATABASE'] = './database.db'
 
