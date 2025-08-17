@@ -192,7 +192,7 @@ def get_shared_files():
         LEFT JOIN hosts h ON f.file_hash = h.file_hash
         GROUP BY f.file_hash
     ''')
-    return cursor.fetchall()
+    return {row['file_hash']: dict(row) for row in cursor.fetchall()}
 
 def maintenance_check():
     """Periodically check file health and redistribute as needed"""
@@ -305,6 +305,8 @@ def maintenance_check():
 @app.route('/')
 def index():
     files = get_shared_files()
+    # Convert SQLite rows to dictionaries and structure the data as the template expects
+    #files_data = {row['file_hash']: dict(row) for row in files}
     return render_template('index.html', files=files, peers=app.config['PEERS'])
 
 @app.route('/upload', methods=['POST'])

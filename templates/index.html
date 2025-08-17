@@ -53,6 +53,9 @@
             background-color: #f9f9f9;
             border-radius: 3px;
         }
+        .file-size {
+            white-space: nowrap;
+        }
     </style>
 </head>
 <body>
@@ -94,12 +97,22 @@
             <tr>
                 <th>Filename</th>
                 <th>Size</th>
+                <th>Hosts</th>
                 <th>Action</th>
             </tr>
-            {% for file_hash, file_info in files %}
+            {% for file_hash, file_info in files.items() %}
             <tr>
                 <td>{{ file_info.name }}</td>
-                <td>{{ (file_info.size / 1024 / 1024)|round(2) }} MB</td>
+                <td class="file-size">
+                    {% if file_info.size < 1024 %}
+                        {{ file_info.size }} bytes
+                    {% elif file_info.size < 1048576 %}
+                        {{ (file_info.size / 1024)|round(1) }} KB
+                    {% else %}
+                        {{ (file_info.size / 1024 / 1024)|round(1) }} MB
+                    {% endif %}
+                </td>
+                <td>{{ file_info.host_count }}</td>
                 <td><a href="/download/{{ file_hash }}"><button>Download</button></a></td>
             </tr>
             {% endfor %}
