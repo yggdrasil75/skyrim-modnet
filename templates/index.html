@@ -227,7 +227,7 @@
                     {% endif %}
                 </td>
                 
-                <td>{{ "%.1f"|format(file.health) }}</td>
+                <td>{{ "%.1f"|format(file_info.health) }}</td>
                 <td><a href="/download/{{ file_hash }}"><button>Download</button></a></td>
             </tr>
             {% endfor %}
