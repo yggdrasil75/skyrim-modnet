@@ -32,5 +32,7 @@ Install Docker
 git clone https://github.com/yggdrasil75/skyrim-modnet
 docker compose up -d
 ```
-Current Version: 0.0.1.
-In this version, its a stupidly simple site with no content. you can tell me your public IP and I can link up or I can send you mine. Its not really any more secure than us sending over any random P2P file sharing app (mutorrent or libtorrent for instance), but it will show all files known to any given host.
+Current Version: 0.0.2.
+
+In this version, its a stupidly simple site. You can port forward port 5000 to receieve connections from a remote host, but you will default to seeing what is hosted on the test system (www.themoddingtree.com:5000)
+If someone knows nat traversal, then please help me figure it out.
