@@ -706,83 +706,83 @@ def download_file(file_hash):
 @app.route('/register_file', methods=['POST'])
 def register_file():
     # First try to get JSON data
-    data = request.get_json(silent=True)
-    
-    # If no JSON data, check if it's form data
-    if not data:
-        if 'file' in request.files:
-            file = request.files['file']
-            if file.filename == '':
-                return jsonify({'status': 'error', 'message': 'No file selected'}), 400
-            
-            if file and allowed_file(file.filename):
-                filename = secure_filename(file.filename)
-                filepath = os.path.join(current_app.config['UPLOAD_FOLDER'], filename)
-                file.save(filepath)
+    if request.content_type == 'application/json':
+        data = request.get_json()
+        
+        # Handle JSON registration
+        if 'file_hash' in data and 'file_info' in data:
+            with app.app_context():
+                db = get_db()
+                cursor = db.cursor()
                 
-                # Calculate file hash
-                file_hash = hash_with_node_id(open(filepath, 'rb').read())
-                
-                # Split file into chunks
-                chunk_hashes = split_file(filepath, file_hash)
-                
-                # Store file metadata in database
-                with app.app_context():
-                    db = get_db()
-                    cursor = db.cursor()
+                # Check if we already know about this file
+                cursor.execute(
+                    'SELECT 1 FROM files WHERE file_hash = ?',
+                    (data['file_hash'],)
+                )
+                if not cursor.fetchone():
+                    # Store the file metadata
                     cursor.execute(
                         'INSERT INTO files (file_hash, name, size, owner) VALUES (?, ?, ?, ?)',
-                        (file_hash, filename, os.path.getsize(filepath), current_app.config['NODE_ID'])
+                        (data['file_hash'], data['file_info']['name'], 
+                         data['file_info']['size'], data['file_info']['owner'])
                     )
+                    
+                    # Store the chunks
+                    for sequence, chunk_hash in enumerate(data['file_info']['chunks']):
+                        cursor.execute(
+                            'INSERT OR IGNORE INTO chunks (chunk_hash, file_hash, sequence) VALUES (?, ?, ?)',
+                            (chunk_hash, data['file_hash'], sequence)
+                        )
+                    
                     db.commit()
-                    
-                    # Register that we're hosting this file
-                    register_hosting(file_hash)
-                    
-                    # Clean up original file
-                    os.remove(filepath)
-                    
-                    return jsonify({
-                        'status': 'success',
-                        'file_hash': file_hash,
-                        'name': filename,
-                        'size': os.path.getsize(filepath),
-                        'chunks': chunk_hashes
-                    })
+                
+                return jsonify({'status': 'success'})
         
-        return jsonify({'status': 'error', 'message': 'Invalid request format'}), 400
+        return jsonify({'status': 'error', 'message': 'Missing required fields'}), 400
     
-    # Handle JSON registration
-    if 'file_hash' in data and 'file_info' in data:
-        with app.app_context():
-            db = get_db()
-            cursor = db.cursor()
+    # Handle file upload
+    elif 'file' in request.files:
+        file = request.files['file']
+        if file.filename == '':
+            return jsonify({'status': 'error', 'message': 'No file selected'}), 400
+        
+        if file and allowed_file(file.filename):
+            filename = secure_filename(file.filename)
+            filepath = os.path.join(current_app.config['UPLOAD_FOLDER'], filename)
+            file.save(filepath)
             
-            # Check if we already know about this file
-            cursor.execute(
-                'SELECT 1 FROM files WHERE file_hash = ?',
-                (data['file_hash'],)
-            )
-            if not cursor.fetchone():
-                # Store the file metadata
+            # Calculate file hash
+            file_hash = hash_with_node_id(open(filepath, 'rb').read())
+            
+            # Split file into chunks
+            chunk_hashes = split_file(filepath, file_hash)
+            
+            # Store file metadata in database
+            with app.app_context():
+                db = get_db()
+                cursor = db.cursor()
                 cursor.execute(
                     'INSERT INTO files (file_hash, name, size, owner) VALUES (?, ?, ?, ?)',
-                    (data['file_hash'], data['file_info']['name'], 
-                     data['file_info']['size'], data['file_info']['owner'])
+                    (file_hash, filename, os.path.getsize(filepath), current_app.config['NODE_ID'])
                 )
-                
-                # Store the chunks
-                for sequence, chunk_hash in enumerate(data['file_info']['chunks']):
-                    cursor.execute(
-                        'INSERT OR IGNORE INTO chunks (chunk_hash, file_hash, sequence) VALUES (?, ?, ?)',
-                        (chunk_hash, data['file_hash'], sequence)
-                    )
-                
                 db.commit()
-            
-            return jsonify({'status': 'success'})
+                
+                # Register that we're hosting this file
+                register_hosting(file_hash)
+                
+                # Clean up original file
+                os.remove(filepath)
+                
+                return jsonify({
+                    'status': 'success',
+                    'file_hash': file_hash,
+                    'name': filename,
+                    'size': os.path.getsize(filepath),
+                    'chunks': chunk_hashes
+                })
     
-    return jsonify({'status': 'error', 'message': 'Missing required fields'}), 400
+    return jsonify({'status': 'error', 'message': 'Invalid request format'}), 400
 
 @app.route('/file_info/<file_hash>')
 def get_file_info(file_hash):
@@ -823,17 +823,23 @@ def get_chunk(chunk_hash):
 @app.route('/upload_chunk', methods=['POST'])
 def upload_chunk():
     if 'chunk' not in request.files:
-        return "No chunk provided", 400
+        return jsonify({'status': 'error', 'message': 'No chunk provided'}), 400
     
     chunk_file = request.files['chunk']
     chunk_hash = os.path.splitext(chunk_file.filename)[0]
     chunk_path = os.path.join(current_app.config['UPLOAD_FOLDER'], f"{chunk_hash}.chunk")
     
-    # Save the chunk directly as binary
-    chunk_file.save(chunk_path)
-    
-    # Return a simple success response without trying to serialize binary data
-    return jsonify({'status': 'success', 'chunk_hash': chunk_hash})
+    try:
+        # Save the chunk
+        chunk_file.save(chunk_path)
+        
+        # Verify the chunk was saved correctly
+        if not os.path.exists(chunk_path):
+            return jsonify({'status': 'error', 'message': 'Failed to save chunk'}), 500
+            
+        return jsonify({'status': 'success', 'chunk_hash': chunk_hash})
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 
 @app.route('/shared_files')
 def list_shared_files():
