@@ -767,7 +767,7 @@ def register_file():
                          data['file_info'].get('game', 'Unknown'),
                          data['file_info'].get('description', ' '),
                          data['file_info'].get('password_hash', 'INVALID HASH'),
-                         data['file_info'].get('origin_node')
+                         data['file_info'].get('origin_node'),
                          data['file_info']['size'], 
                          data['file_info']['owner'],
                          data['file_info'].get('timestamp')
