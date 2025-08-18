@@ -257,7 +257,7 @@ def get_shared_files():
         db = get_db()
         cursor = db.cursor()
         cursor.execute('''
-            SELECT f.file_hash, f.original_name, f.display_name, f.size, f.owner
+            SELECT f.file_hash, f.original_name, f.display_name, f.game, f.size, f.owner
             FROM files f
         ''')
         files = cursor.fetchall()
