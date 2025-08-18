@@ -427,7 +427,7 @@ def maintenance_check():
                             WHERE c.file_hash = ?
                             GROUP BY c.chunk_hash
                             ORDER BY host_count ASC
-                            LIMIT 5  # Only get the 5 most vulnerable chunks
+                            LIMIT 5
                         ''', (file_hash,))
                         vulnerable_chunks = cursor.fetchall()
                         
@@ -552,7 +552,7 @@ def maintenance_check():
                                         (file_hash, file_info['original_name'], file_info['display_name'], file_info['game'], file_info['description'], file_info['password_hash'], file_info['origin_node'], file_info['size'], file_info['owner'])
                                     )
                                     db.commit()
-                                    print(f"Discovered new file from {peer}: {file_info['name']}")
+                                    print(f"Discovered new file from {peer}: {file_info['original_name']}")
                     except requests.exceptions.RequestException as e:
                         print(f"Failed to check for files from {peer}: {str(e)}")
                         continue
