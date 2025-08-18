@@ -427,66 +427,95 @@ def maintenance_check():
                             WHERE c.file_hash = ?
                             GROUP BY c.chunk_hash
                             ORDER BY host_count ASC
+                            LIMIT 5  # Only get the 5 most vulnerable chunks
                         ''', (file_hash,))
                         vulnerable_chunks = cursor.fetchall()
+                        
+                        if not vulnerable_chunks:
+                            continue
+                            
+                        vulnerable_chunk_hashes = [row['chunk_hash'] for row in vulnerable_chunks]
                         
                         # Find peers that don't have these chunks yet
                         candidates = []
                         for peer in all_peers:
-                            peer_id = peer.split('//')[-1].replace(':', '_')
-                            
-                            # Check if peer already has any of these chunks
-                            cursor.execute('''
-                                SELECT 1 FROM hosts 
-                                WHERE file_hash = ? AND node_id = ?
-                                LIMIT 1
-                            ''', (file_hash, peer_id))
-                            if not cursor.fetchone():
-                                candidates.append(peer)
+                            try:
+                                # First check if peer already has these chunks
+                                response = requests.post(
+                                    f"{peer}/check_chunks",
+                                    json={'chunks': vulnerable_chunk_hashes},
+                                    timeout=2
+                                )
+                                
+                                if response.status_code == 200:
+                                    data = response.json()
+                                    # If peer is missing any of these chunks, they're a candidate
+                                    if len(data['available_chunks']) < len(vulnerable_chunk_hashes):
+                                        candidates.append(peer)
+                            except requests.exceptions.RequestException:
+                                continue
                         
-                        # Share vulnerable chunks with peers
+                        # Share vulnerable chunks with peers that need them
                         needed = min(3, len(candidates))  # Share with up to 3 new peers
                         for i in range(needed):
                             peer = candidates[i]
                             try:
-                                # First send the file info
+                                # First check which chunks this peer is missing
+                                response = requests.post(
+                                    f"{peer}/check_chunks",
+                                    json={'chunks': vulnerable_chunk_hashes},
+                                    timeout=2
+                                )
+                                
+                                if response.status_code != 200:
+                                    continue
+                                    
+                                data = response.json()
+                                missing_chunks = set(vulnerable_chunk_hashes) - set(data['available_chunks'])
+                                
+                                if not missing_chunks:
+                                    continue
+                                
+                                # Send file info first
                                 cursor.execute(
                                     'SELECT * FROM files WHERE file_hash = ?',
                                     (file_hash,)
                                 )
                                 file_info = dict(cursor.fetchone())
+                                file_info['chunks'] = list(missing_chunks)
                                 
-                                # Get chunks (only the most vulnerable ones)
-                                vulnerable_chunk_hashes = [row['chunk_hash'] for row in vulnerable_chunks[:5]]  # Share top 5 most vulnerable
-                                file_info['chunks'] = vulnerable_chunk_hashes
-                                
-                                # Ensure the peer URL is properly formatted
-                                register_url = f"{peer}/register_file"
-                                print(f"Sending file info to {register_url}")
-                                response = requests.post(register_url, json={
-                                    'file_hash': file_hash,
-                                    'file_info': file_info
-                                }, timeout=5)
+                                response = requests.post(
+                                    f"{peer}/register_file",
+                                    json={
+                                        'file_hash': file_hash,
+                                        'file_info': file_info
+                                    },
+                                    timeout=5
+                                )
                                 response.raise_for_status()
                                 
-                                # Then send vulnerable chunks as binary data
-                                for chunk_hash in vulnerable_chunk_hashes:
+                                # Then send missing chunks
+                                for chunk_hash in missing_chunks:
                                     chunk_path = os.path.join(current_app.config['UPLOAD_FOLDER'], f"{chunk_hash}.chunk")
                                     if os.path.exists(chunk_path):
                                         with open(chunk_path, 'rb') as f:
-                                            upload_url = f"{peer}/upload_chunk"
-                                            print(f"Sending vulnerable chunk to {upload_url}")
                                             files = {'chunk': (f"{chunk_hash}.chunk", f)}
-                                            response = requests.post(upload_url, files=files, timeout=5)
+                                            response = requests.post(
+                                                f"{peer}/upload_chunk",
+                                                files=files,
+                                                timeout=5
+                                            )
                                             response.raise_for_status()
                                 
                                 # Register that this peer is now hosting the file
-                                host_url = f"{peer}/register_hosting"
-                                print(f"Registering hosting with {host_url}")
-                                response = requests.post(host_url, json={
-                                    'file_hash': file_hash,
-                                    'node_id': current_app.config['NODE_ID_HEX']
-                                }, timeout=2)
+                                response = requests.post(
+                                    f"{peer}/register_hosting",
+                                    json={
+                                        'file_hash': file_hash,
+                                        'node_id': current_app.config['NODE_ID_HEX']
+                                    },
+                                    timeout=2
+                                )
                                 response.raise_for_status()
                                 
                                 print(f"Successfully shared vulnerable chunks of {file_name} with {peer}")
@@ -500,7 +529,7 @@ def maintenance_check():
                 
                 except Exception as e:
                     print(f"Error during maintenance for {file_name}: {str(e)}")
-            
+
             # Check for new files from peers (only friends and regular peers)
             for peer_type in ['friends', 'peers']:
                 for peer in current_app.config['PEER_TYPES'][peer_type]:
@@ -561,14 +590,12 @@ def calculate_file_health(file_hash):
         if min_hosts == 0:
             return 0.0  # At least one chunk has no hosts
         
+        # Calculate health score based on min hosts (most vulnerable chunk)
+        health = min(min_hosts, 10.0)  # Each additional host adds 2.0 to health, capped at 10.0
+        
+        # Apply small bonus for average hosts
         avg_hosts = sum(chunk_host_counts) / len(chunk_host_counts)
-        
-        # Calculate health score (capped at 10.0)
-        health = min(avg_hosts, 10.0)
-        
-        # Apply penalty if any chunk has only 1 host (even if average is high)
-        if min_hosts == 1:
-            health = min(health, 1.5)
+        health = min(health + (avg_hosts - min_hosts) * 0.5, 10.0)
         
         return health
 
@@ -581,7 +608,37 @@ def index():
         return render_template('index.html', 
                             files=files_data, 
                             peer_types=current_app.config['PEER_TYPES'])
+
+@app.route('/check_chunks', methods=['POST'])
+def check_chunks():
+    """Check which chunks this node already has"""
+    data = request.get_json()
+    if not data or 'chunks' not in data:
+        return jsonify({'status': 'error', 'message': 'Missing chunks list'}), 400
     
+    with app.app_context():
+        db = get_db()
+        cursor = db.cursor()
+        
+        # Check which chunks we have locally
+        available_chunks = []
+        for chunk_hash in data['chunks']:
+            chunk_path = os.path.join(current_app.config['UPLOAD_FOLDER'], f"{chunk_hash}.chunk")
+            if os.path.exists(chunk_path):
+                available_chunks.append(chunk_hash)
+            else:
+                # Also check database in case it's registered but file is missing
+                cursor.execute(
+                    'SELECT 1 FROM chunks WHERE chunk_hash = ?',
+                    (chunk_hash,))
+                if cursor.fetchone():
+                    available_chunks.append(chunk_hash)
+        
+        return jsonify({
+            'status': 'success',
+            'available_chunks': available_chunks
+        })
+
 # Updated download function to prioritize friends for chunk retrieval
 def generate_download_stream(file_hash):
     with app.app_context():
