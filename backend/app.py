@@ -24,28 +24,47 @@ app.config['CHUNK_SIZE'] = 256 * 1024  # 256KB chunks
 app.config['ALLOWED_EXTENSIONS'] = {'zip', 'rar', '7z', 'mod', 'jar'}
 app.config['PEERS'] = set()  # Set to store peer addresses
 app.config['DEFAULT_PEERS'] = {'http://www.themoddingtree.com'}  # Default peers
+
 def get_persistent_node_id():
+    """Generate a persistent, cryptographically secure node ID that's 32 bytes long"""
     os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
     node_id_file = os.path.join(app.config['UPLOAD_FOLDER'], 'node_id')
+    
     try:
-        with open(node_id_file, 'r') as f:
-            node_id = f.read().strip()
+        with open(node_id_file, 'rb') as f:
+            node_id = f.read()
+            # Verify the node ID is the correct length (32 bytes)
+            if len(node_id) == 32:
+                return node_id
     except FileNotFoundError:
-        node_id = hashlib.sha256(os.urandom(32)).hexdigest()[:8]
-        with open(node_id_file, 'w') as f:
-            f.write(node_id)
+        pass
+    
+    # Generate a new node ID if none exists or it's invalid
+    node_id = os.urandom(32)
+    with open(node_id_file, 'wb') as f:
+        f.write(node_id)
+    
     return node_id
 
 app.config['NODE_ID'] = get_persistent_node_id()
+app.config['NODE_ID_HEX'] = app.config['NODE_ID'].hex()  # Hex representation for display
 app.config['MAINTENANCE_INTERVAL'] = 60  # Seconds between maintenance checks
 app.config['DATABASE'] = './database.db'
 
-# Database setup
+# Database setup with node ID as salt
 def get_db():
     db = getattr(g, '_database', None)
     if db is None:
         db = g._database = sqlite3.connect(app.config['DATABASE'])
         db.row_factory = sqlite3.Row
+        
+        # Apply node_id as salt for database operations
+        cursor = db.cursor()
+        cursor.execute(f"PRAGMA key = '{app.config['NODE_ID_HEX']}'")
+        cursor.execute("PRAGMA cipher_compatibility = 3")
+        cursor.execute("PRAGMA kdf_iter = 256000")  # High iteration count for security
+        cursor.execute("PRAGMA cipher_page_size = 4096")
+    
     return db
 
 def init_db():
@@ -102,10 +121,16 @@ def close_db(exception):
 def teardown_db(exception):
     close_db(exception)
 
-# Helper functions
+# Helper functions with node ID as salt for cryptographic operations
 def allowed_file(filename):
     return '.' in filename and \
            filename.rsplit('.', 1)[1].lower() in app.config['ALLOWED_EXTENSIONS']
+
+def hash_with_node_id(data):
+    """Hash data with the node ID as salt for consistent hashing"""
+    if isinstance(data, str):
+        data = data.encode('utf-8')
+    return hashlib.sha256(data + app.config['NODE_ID']).hexdigest()
 
 def split_file(filepath, file_hash):
     """Split file into chunks and return chunk hashes"""
@@ -120,7 +145,8 @@ def split_file(filepath, file_hash):
                 chunk = f.read(current_app.config['CHUNK_SIZE'])
                 if not chunk:
                     break
-                chunk_hash = hashlib.sha256(chunk).hexdigest()
+                # Use node ID as salt for chunk hashing
+                chunk_hash = hash_with_node_id(chunk)
                 chunk_filename = f"{chunk_hash}.chunk"
                 chunk_path = os.path.join(current_app.config['UPLOAD_FOLDER'], chunk_filename)
                 
@@ -139,7 +165,7 @@ def split_file(filepath, file_hash):
         
         db.commit()
         return chunks
-
+    
 def reassemble_file(file_hash, output_path):
     """Reassemble file from chunks"""
     with app.app_context():
