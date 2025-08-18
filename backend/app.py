@@ -548,8 +548,8 @@ def maintenance_check():
                                 if not cursor.fetchone():
                                     # New file discovered
                                     cursor.execute(
-                                        'INSERT INTO files (file_hash, original_name, display_name, size, owner) VALUES (?, ?, ?, ?, ?)',
-                                        (file_hash, file_info['original_name'], file_info['display_name'], file_info['size'], file_info['owner'])
+                                        'INSERT INTO files (file_hash, original_name, display_name, game, size, owner) VALUES (?, ?, ?, ?, ?, ?)',
+                                        (file_hash, file_info['original_name'], file_info['display_name'], file_info['game'], file_info['size'], file_info['owner'])
                                     )
                                     db.commit()
                                     print(f"Discovered new file from {peer}: {file_info['name']}")
