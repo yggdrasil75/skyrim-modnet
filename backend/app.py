@@ -760,12 +760,18 @@ def register_file():
                 if not cursor.fetchone():
                     # Store the file metadata
                     cursor.execute(
-                        'INSERT INTO files (file_hash, original_name, display_name, size, owner) VALUES (?, ?, ?, ?, ?)',
+                        'INSERT INTO files (file_hash, original_name, display_name, game, description, password_hash, origin_node, size, owner, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
                         (data['file_hash'], 
                          data['file_info'].get('original_name', data['file_info'].get('name', 'unknown')),
                          data['file_info'].get('display_name', data['file_info'].get('name', 'unknown')),
+                         data['file_info'].get('game', 'Unknown'),
+                         data['file_info'].get('description', ' '),
+                         data['file_info'].get('password_hash', 'INVALID HASH'),
+                         data['file_info'].get('origin_node')
                          data['file_info']['size'], 
-                         data['file_info']['owner'])
+                         data['file_info']['owner'],
+                         data['file_info'].get('timestamp')
+                         )
                     )
                     
                     # Store the chunks
