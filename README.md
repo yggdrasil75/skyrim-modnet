@@ -22,7 +22,7 @@ Install Python
 git clone https://github.com/yggdrasil75/skyrim-modnet
 python -m venv venv
 source venv/bin/activate OR venv\scripts\activate
-pip install flask requests werkzeug
+pip install -r requirements.txt
 python backend/app.py
 ```
 ## option 2:
