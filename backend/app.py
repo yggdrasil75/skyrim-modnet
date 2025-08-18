@@ -375,7 +375,6 @@ def set_peer_type():
     except ValueError as e:
         return str(e), 400
 
-# Updated maintenance check to prioritize friends
 def maintenance_check():
     """Periodically check file health and redistribute as needed"""
     with app.app_context():
@@ -446,16 +445,15 @@ def maintenance_check():
                                 }, timeout=5)
                                 response.raise_for_status()
                                 
-                                # Then send all chunks
+                                # Then send all chunks as binary data
                                 for chunk_hash in file_info['chunks']:
                                     chunk_path = os.path.join(current_app.config['UPLOAD_FOLDER'], f"{chunk_hash}.chunk")
                                     if os.path.exists(chunk_path):
                                         with open(chunk_path, 'rb') as f:
                                             upload_url = f"{peer}/upload_chunk"
                                             print(f"Sending chunk to {upload_url}")
-                                            response = requests.post(upload_url, files={
-                                                'chunk': (f"{chunk_hash}.chunk", f)
-                                            }, timeout=5)
+                                            files = {'chunk': (f"{chunk_hash}.chunk", f)}
+                                            response = requests.post(upload_url, files=files, timeout=5)
                                             response.raise_for_status()
                                 
                                 # Register that this peer is now hosting the file
@@ -463,7 +461,7 @@ def maintenance_check():
                                 print(f"Registering hosting with {host_url}")
                                 response = requests.post(host_url, json={
                                     'file_hash': file_hash,
-                                    'node_id': current_app.config['NODE_ID']
+                                    'node_id': current_app.config['NODE_ID_HEX']  # Using hex representation for JSON
                                 }, timeout=2)
                                 response.raise_for_status()
                                 
@@ -472,7 +470,7 @@ def maintenance_check():
                                 print(f"Failed to share with {peer}: {str(e)}")
                     
                     # If we have too many hosts (more than 10), consider removing our copy
-                    elif host_count > 10 and owner == current_app.config['NODE_ID']:
+                    elif host_count > 10 and owner == current_app.config['NODE_ID_HEX']:
                         print(f"File {file_name} has enough hosts ({host_count}), we can stop hosting")
                 
                 except Exception as e:
@@ -651,21 +649,111 @@ def download_file(file_hash):
             else:
                 return "File not found", 404
 
-    response = Response(
-        generate_download_stream(file_hash),
-        mimetype='application/octet-stream',
-        headers={
-            'Content-Disposition': f'attachment; filename="{file_info["name"]}"',
-            'Content-Length': file_info['size']
-        }
-    )
-    
-    return response
+        # Create a generator to stream the file
+        def generate():
+            # Get all chunks for this file in order
+            cursor.execute(
+                'SELECT chunk_hash FROM chunks WHERE file_hash = ? ORDER BY sequence',
+                (file_hash,)
+            )
+            chunk_hashes = [row['chunk_hash'] for row in cursor.fetchall()]
+            
+            if not chunk_hashes:
+                raise ValueError("No chunks found for this file")
+            
+            for chunk_hash in chunk_hashes:
+                chunk_path = os.path.join(current_app.config['UPLOAD_FOLDER'], f"{chunk_hash}.chunk")
+                
+                # Try local chunk first
+                if os.path.exists(chunk_path):
+                    with open(chunk_path, 'rb') as chunk_file:
+                        yield chunk_file.read()
+                    continue
+                    
+                # Try to fetch chunk from peers - friends first, then peers, then strangers
+                chunk_found = False
+                for peer_type in ['friends', 'peers', 'strangers']:
+                    for peer in current_app.config['PEER_TYPES'][peer_type]:
+                        try:
+                            response = requests.get(f"{peer}/chunk/{chunk_hash}", stream=True, timeout=5)
+                            if response.status_code == 200:
+                                yield from response.iter_content(chunk_size=8192)
+                                # Save chunk locally for future requests
+                                with open(chunk_path, 'wb') as f:
+                                    response.raw.decode_content = True
+                                    f.write(response.raw.read())
+                                chunk_found = True
+                                break
+                        except requests.exceptions.RequestException:
+                            continue
+                    if chunk_found:
+                        break
+                
+                if not chunk_found:
+                    raise FileNotFoundError(f"Missing chunk {chunk_hash} for file {file_hash}")
+
+        response = Response(
+            generate(),
+            mimetype='application/octet-stream',
+            headers={
+                'Content-Disposition': f'attachment; filename="{file_info["name"]}"',
+                'Content-Length': file_info['size']
+            }
+        )
+        
+        return response
 
 @app.route('/register_file', methods=['POST'])
 def register_file():
-    data = request.json
-    if data and 'file_hash' in data and 'file_info' in data:
+    # First try to get JSON data
+    data = request.get_json(silent=True)
+    
+    # If no JSON data, check if it's form data
+    if not data:
+        if 'file' in request.files:
+            file = request.files['file']
+            if file.filename == '':
+                return jsonify({'status': 'error', 'message': 'No file selected'}), 400
+            
+            if file and allowed_file(file.filename):
+                filename = secure_filename(file.filename)
+                filepath = os.path.join(current_app.config['UPLOAD_FOLDER'], filename)
+                file.save(filepath)
+                
+                # Calculate file hash
+                file_hash = hash_with_node_id(open(filepath, 'rb').read())
+                
+                # Split file into chunks
+                chunk_hashes = split_file(filepath, file_hash)
+                
+                # Store file metadata in database
+                with app.app_context():
+                    db = get_db()
+                    cursor = db.cursor()
+                    cursor.execute(
+                        'INSERT INTO files (file_hash, name, size, owner) VALUES (?, ?, ?, ?)',
+                        (file_hash, filename, os.path.getsize(filepath), current_app.config['NODE_ID'])
+                    )
+                    db.commit()
+                    
+                    # Register that we're hosting this file
+                    register_hosting(file_hash)
+                    
+                    # Clean up original file
+                    os.remove(filepath)
+                    
+                    return jsonify({
+                        'status': 'success',
+                        'file_hash': file_hash,
+                        'name': filename,
+                        'size': os.path.getsize(filepath),
+                        'chunks': chunk_hashes
+                    })
+        
+        return jsonify({'status': 'error', 'message': 'Invalid request format'}), 400
+    
+    # Handle JSON registration
+    if 'file_hash' in data and 'file_info' in data:
         with app.app_context():
             db = get_db()
             cursor = db.cursor()
@@ -693,7 +781,8 @@ def register_file():
                 db.commit()
             
             return jsonify({'status': 'success'})
-    return jsonify({'status': 'error'}), 400
+    
+    return jsonify({'status': 'error', 'message': 'Missing required fields'}), 400
 
 @app.route('/file_info/<file_hash>')
 def get_file_info(file_hash):
@@ -728,7 +817,7 @@ def get_file_info(file_hash):
 def get_chunk(chunk_hash):
     chunk_path = os.path.join(current_app.config['UPLOAD_FOLDER'], f"{chunk_hash}.chunk")
     if os.path.exists(chunk_path):
-        return send_file(chunk_path)
+        return send_file(chunk_path, mimetype='application/octet-stream')
     return "Chunk not found", 404
 
 @app.route('/upload_chunk', methods=['POST'])
@@ -740,7 +829,10 @@ def upload_chunk():
     chunk_hash = os.path.splitext(chunk_file.filename)[0]
     chunk_path = os.path.join(current_app.config['UPLOAD_FOLDER'], f"{chunk_hash}.chunk")
     
+    # Save the chunk directly as binary
     chunk_file.save(chunk_path)
+    
+    # Return a simple success response without trying to serialize binary data
     return jsonify({'status': 'success', 'chunk_hash': chunk_hash})
 
 @app.route('/shared_files')
