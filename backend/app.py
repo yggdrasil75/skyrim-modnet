@@ -323,7 +323,6 @@ def categorize_peer(peer_address, peer_type):
         )
         db.commit()
 
-# Updated add_peer endpoint with type specification
 @app.route('/add_peer', methods=['POST'])
 def add_peer():
     peer_address = request.form.get('peer_address')
@@ -382,6 +381,7 @@ def set_peer_type():
 
 def maintenance_check():
     """Periodically check file health and redistribute as needed"""
+    os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
     with app.app_context():
         while True:
             time.sleep(current_app.config['MAINTENANCE_INTERVAL'])
