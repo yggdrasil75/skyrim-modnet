@@ -23,7 +23,7 @@ app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024 * 1024  # 16MB max
 app.config['CHUNK_SIZE'] = 256 * 1024  # 256KB chunks
 app.config['ALLOWED_EXTENSIONS'] = {'zip', 'rar', '7z', 'mod', 'jar'}
 app.config['PEERS'] = set()  # Set to store peer addresses
-app.config['DEFAULT_PEERS'] = {'http://www.themoddingtree.com'}  # Default peers
+app.config['DEFAULT_PEERS'] = {'http://www.themoddingtree.com:5000'}  # Default peers
 
 def get_persistent_node_id():
     """Generate a persistent, cryptographically secure node ID that's 32 bytes long"""
