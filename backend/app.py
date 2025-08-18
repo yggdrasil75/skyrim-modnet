@@ -76,7 +76,12 @@ def init_db():
         cursor.execute('''
         CREATE TABLE IF NOT EXISTS files (
             file_hash TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
+            original_name TEXT NOT NULL,
+            display_name TEXT NOT NULL,
+            game TEXT NOT NULL,
+            description TEXT,
+            password_hash TEXT NOT NULL,
+            origin_node TEXT NOT NULL,
             size INTEGER NOT NULL,
             owner TEXT NOT NULL,
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
@@ -252,7 +257,7 @@ def get_shared_files():
         db = get_db()
         cursor = db.cursor()
         cursor.execute('''
-            SELECT f.file_hash, f.name, f.size, f.owner, 
+            SELECT f.file_hash, f.original_name, f.display_name, f.size, f.owner, 
                    COUNT(h.node_id) as host_count
             FROM files f
             LEFT JOIN hosts h ON f.file_hash = h.file_hash
@@ -392,12 +397,12 @@ def maintenance_check():
             # Check each file's health
             db = get_db()
             cursor = db.cursor()
-            cursor.execute('SELECT file_hash, name, owner FROM files')
+            cursor.execute('SELECT file_hash, original_name, display_name, owner FROM files')
             files = cursor.fetchall()
             
             for file in files:
                 file_hash = file['file_hash']
-                file_name = file['name']
+                file_name = file['display_name']  # Using display_name instead of name
                 owner = file['owner']
                 
                 try:
@@ -570,6 +575,11 @@ def upload_file():
     if file.filename == '':
         return redirect(request.url)
     
+    required_fields = ['display_name', 'game', 'password']
+    for field in required_fields:
+        if not request.form.get(field):
+            return f"Missing required field: {field}", 400
+    
     if file and allowed_file(file.filename):
         filename = secure_filename(file.filename)
         filepath = os.path.join(current_app.config['UPLOAD_FOLDER'], filename)
@@ -577,6 +587,9 @@ def upload_file():
         
         # Calculate file hash
         file_hash = hashlib.sha256(open(filepath, 'rb').read()).hexdigest()
+        
+        # Hash the password with node ID as salt
+        password_hash = hash_with_node_id(request.form['password'])
         
         # Split file into chunks
         chunk_hashes = split_file(filepath, file_hash)
@@ -586,8 +599,16 @@ def upload_file():
             db = get_db()
             cursor = db.cursor()
             cursor.execute(
-                'INSERT INTO files (file_hash, name, size, owner) VALUES (?, ?, ?, ?)',
-                (file_hash, filename, os.path.getsize(filepath), current_app.config['NODE_ID'])
+                'INSERT INTO files (file_hash, original_name, display_name, game, description, password_hash, origin_node, size, owner) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                (file_hash, 
+                 filename,
+                 request.form['display_name'],
+                 request.form['game'],
+                 request.form.get('description', ''),
+                 password_hash,
+                 current_app.config['NODE_ID_HEX'],
+                 os.path.getsize(filepath), 
+                 current_app.config['NODE_ID_HEX'])
             )
             db.commit()
             
@@ -598,17 +619,25 @@ def upload_file():
             broadcast_to_peers({
                 'file_hash': file_hash,
                 'file_info': {
-                    'name': filename,
+                    'original_name': filename,
+                    'display_name': request.form['display_name'],
+                    'game': request.form['game'],
+                    'description': request.form.get('description', ''),
+                    'password_hash': password_hash,
+                    'origin_node': current_app.config['NODE_ID_HEX'],
                     'size': os.path.getsize(filepath),
                     'chunks': chunk_hashes,
-                    'owner': current_app.config['NODE_ID']
+                    'owner': current_app.config['NODE_ID_HEX']
                 }
             }, 'register_file')
             
             # Clean up original file (we only keep chunks)
             os.remove(filepath)
             
-            return redirect(url_for('index'))
+            # Show success message with password reminder
+            return render_template('upload_success.html', 
+                                file_name=request.form['display_name'],
+                                password=request.form['password'])
     
     return redirect(request.url)
 
@@ -620,7 +649,7 @@ def download_file(file_hash):
         
         # Check if we have the file in our database
         cursor.execute(
-            'SELECT name, size FROM files WHERE file_hash = ?',
+            'SELECT original_name, display_name, size FROM files WHERE file_hash = ?',
             (file_hash,)
         )
         file_info = cursor.fetchone()
@@ -635,11 +664,19 @@ def download_file(file_hash):
                             file_data = response.json()
                             # Store the file info in our database
                             cursor.execute(
-                                'INSERT INTO files (file_hash, name, size, owner) VALUES (?, ?, ?, ?)',
-                                (file_hash, file_data['name'], file_data['size'], file_data['owner'])
+                                'INSERT INTO files (file_hash, original_name, display_name, size, owner) VALUES (?, ?, ?, ?, ?)',
+                                (file_hash, 
+                                 file_data.get('original_name', file_data.get('name', 'unknown')),
+                                 file_data.get('display_name', file_data.get('name', 'unknown')),
+                                 file_data['size'], 
+                                 file_data['owner'])
                             )
                             db.commit()
-                            file_info = {'name': file_data['name'], 'size': file_data['size']}
+                            file_info = {
+                                'original_name': file_data.get('original_name', file_data.get('name', 'unknown')),
+                                'display_name': file_data.get('display_name', file_data.get('name', 'unknown')),
+                                'size': file_data['size']
+                            }
                             break
                     except requests.exceptions.RequestException:
                         continue
@@ -696,7 +733,7 @@ def download_file(file_hash):
             generate(),
             mimetype='application/octet-stream',
             headers={
-                'Content-Disposition': f'attachment; filename="{file_info["name"]}"',
+                'Content-Disposition': f'attachment; filename="{file_info["original_name"]}"',
                 'Content-Length': file_info['size']
             }
         )
@@ -784,6 +821,85 @@ def register_file():
     
     return jsonify({'status': 'error', 'message': 'Invalid request format'}), 400
 
+@app.route('/update_file/<file_hash>', methods=['POST'])
+def update_file(file_hash):
+    if 'file' not in request.files:
+        return "No file provided", 400
+    
+    password = request.form.get('password')
+    if not password:
+        return "Password required for updates", 401
+    
+    with app.app_context():
+        db = get_db()
+        cursor = db.cursor()
+        
+        # Verify password
+        cursor.execute(
+            'SELECT password_hash FROM files WHERE file_hash = ?',
+            (file_hash,)
+        )
+        result = cursor.fetchone()
+        if not result:
+            return "File not found", 404
+            
+        # Verify password hash matches
+        provided_hash = hash_with_node_id(password)
+        if provided_hash != result['password_hash']:
+            return "Invalid password", 403
+        
+        # Proceed with update
+        file = request.files['file']
+        if file and allowed_file(file.filename):
+            filename = secure_filename(file.filename)
+            filepath = os.path.join(current_app.config['UPLOAD_FOLDER'], filename)
+            file.save(filepath)
+            
+            # Calculate new file hash
+            new_file_hash = hashlib.sha256(open(filepath, 'rb').read()).hexdigest()
+            
+            # Split file into chunks
+            chunk_hashes = split_file(filepath, new_file_hash)
+            
+            # Update file metadata in database
+            cursor.execute(
+                '''UPDATE files SET 
+                    file_hash = ?,
+                    original_name = ?,
+                    size = ?,
+                    timestamp = CURRENT_TIMESTAMP
+                WHERE file_hash = ?''',
+                (new_file_hash, filename, os.path.getsize(filepath), file_hash)
+            )
+            
+            # Remove old chunks and add new ones
+            cursor.execute('DELETE FROM chunks WHERE file_hash = ?', (file_hash,))
+            for sequence, chunk_hash in enumerate(chunk_hashes):
+                cursor.execute(
+                    'INSERT INTO chunks (chunk_hash, file_hash, sequence) VALUES (?, ?, ?)',
+                    (chunk_hash, new_file_hash, sequence)
+                )
+            
+            db.commit()
+            
+            # Broadcast update to peers
+            broadcast_to_peers({
+                'old_file_hash': file_hash,
+                'new_file_hash': new_file_hash,
+                'file_info': {
+                    'original_name': filename,
+                    'size': os.path.getsize(filepath),
+                    'chunks': chunk_hashes
+                }
+            }, 'update_file')
+            
+            # Clean up original file
+            os.remove(filepath)
+            
+            return redirect(url_for('index'))
+    
+    return "Invalid file", 400
+
 @app.route('/file_info/<file_hash>')
 def get_file_info(file_hash):
     with app.app_context():
@@ -791,7 +907,7 @@ def get_file_info(file_hash):
         cursor = db.cursor()
         
         cursor.execute(
-            'SELECT file_hash, name, size, owner FROM files WHERE file_hash = ?',
+            'SELECT file_hash, original_name, display_name, size, owner FROM files WHERE file_hash = ?',
             (file_hash,)
         )
         file_info = cursor.fetchone()
@@ -806,7 +922,8 @@ def get_file_info(file_hash):
             
             return jsonify({
                 'file_hash': file_info['file_hash'],
-                'name': file_info['name'],
+                'original_name': file_info['original_name'],
+                'display_name': file_info['display_name'],
                 'size': file_info['size'],
                 'owner': file_info['owner'],
                 'chunks': chunks
