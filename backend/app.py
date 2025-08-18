@@ -252,18 +252,24 @@ def get_file_hosts(file_hash):
         return [row['node_id'] for row in cursor.fetchall()]
 
 def get_shared_files():
-    """Get all files shared in the network"""
+    """Get all files shared in the network with health scores"""
     with app.app_context():
         db = get_db()
         cursor = db.cursor()
         cursor.execute('''
-            SELECT f.file_hash, f.original_name, f.display_name, f.size, f.owner, 
-                   COUNT(h.node_id) as host_count
+            SELECT f.file_hash, f.original_name, f.display_name, f.size, f.owner
             FROM files f
-            LEFT JOIN hosts h ON f.file_hash = h.file_hash
-            GROUP BY f.file_hash
         ''')
-        return cursor.fetchall()
+        files = cursor.fetchall()
+        
+        # Add health score to each file
+        result = []
+        for file in files:
+            file_dict = dict(file)
+            file_dict['health'] = calculate_file_health(file['file_hash'])
+            result.append(file_dict)
+        
+        return result
 
 # Update the peer loading function
 def load_peers_from_db():
@@ -402,28 +408,44 @@ def maintenance_check():
             
             for file in files:
                 file_hash = file['file_hash']
-                file_name = file['display_name']  # Using display_name instead of name
+                file_name = file['display_name']
                 owner = file['owner']
                 
                 try:
-                    # Get all hosts for this file
-                    hosts = get_file_hosts(file_hash)
-                    host_count = len(hosts)
+                    health = calculate_file_health(file_hash)
+                    print(f"File {file_name} has health score: {health:.1f}")
                     
-                    print(f"File {file_name} has {host_count} hosts")
-                    
-                    # If we have too few hosts (less than 3), share with peers
-                    if host_count < 3:
-                        print(f"File {file_name} needs more hosts (only {host_count})")
-                        # Find peers that don't have this file yet
+                    # If health is below 3.0, we need to share more chunks
+                    if health < 3.0:
+                        print(f"File {file_name} needs health improvement (current: {health:.1f})")
+                        
+                        # Get chunks with lowest host counts
+                        cursor.execute('''
+                            SELECT c.chunk_hash, COUNT(DISTINCT h.node_id) as host_count
+                            FROM chunks c
+                            LEFT JOIN hosts h ON c.file_hash = h.file_hash
+                            WHERE c.file_hash = ?
+                            GROUP BY c.chunk_hash
+                            ORDER BY host_count ASC
+                        ''', (file_hash,))
+                        vulnerable_chunks = cursor.fetchall()
+                        
+                        # Find peers that don't have these chunks yet
                         candidates = []
                         for peer in all_peers:
-                            peer_id = peer.split('//')[-1].replace(':', '_')  # Create a simple ID from the peer address
-                            if peer_id not in hosts:
+                            peer_id = peer.split('//')[-1].replace(':', '_')
+                            
+                            # Check if peer already has any of these chunks
+                            cursor.execute('''
+                                SELECT 1 FROM hosts 
+                                WHERE file_hash = ? AND node_id = ?
+                                LIMIT 1
+                            ''', (file_hash, peer_id))
+                            if not cursor.fetchone():
                                 candidates.append(peer)
                         
-                        # Share with enough peers to reach minimum, prioritizing friends
-                        needed = min(3 - host_count, len(candidates))
+                        # Share vulnerable chunks with peers
+                        needed = min(3, len(candidates))  # Share with up to 3 new peers
                         for i in range(needed):
                             peer = candidates[i]
                             try:
@@ -434,12 +456,9 @@ def maintenance_check():
                                 )
                                 file_info = dict(cursor.fetchone())
                                 
-                                # Get chunks
-                                cursor.execute(
-                                    'SELECT chunk_hash FROM chunks WHERE file_hash = ? ORDER BY sequence',
-                                    (file_hash,)
-                                )
-                                file_info['chunks'] = [row['chunk_hash'] for row in cursor.fetchall()]
+                                # Get chunks (only the most vulnerable ones)
+                                vulnerable_chunk_hashes = [row['chunk_hash'] for row in vulnerable_chunks[:5]]  # Share top 5 most vulnerable
+                                file_info['chunks'] = vulnerable_chunk_hashes
                                 
                                 # Ensure the peer URL is properly formatted
                                 register_url = f"{peer}/register_file"
@@ -450,13 +469,13 @@ def maintenance_check():
                                 }, timeout=5)
                                 response.raise_for_status()
                                 
-                                # Then send all chunks as binary data
-                                for chunk_hash in file_info['chunks']:
+                                # Then send vulnerable chunks as binary data
+                                for chunk_hash in vulnerable_chunk_hashes:
                                     chunk_path = os.path.join(current_app.config['UPLOAD_FOLDER'], f"{chunk_hash}.chunk")
                                     if os.path.exists(chunk_path):
                                         with open(chunk_path, 'rb') as f:
                                             upload_url = f"{peer}/upload_chunk"
-                                            print(f"Sending chunk to {upload_url}")
+                                            print(f"Sending vulnerable chunk to {upload_url}")
                                             files = {'chunk': (f"{chunk_hash}.chunk", f)}
                                             response = requests.post(upload_url, files=files, timeout=5)
                                             response.raise_for_status()
@@ -466,17 +485,18 @@ def maintenance_check():
                                 print(f"Registering hosting with {host_url}")
                                 response = requests.post(host_url, json={
                                     'file_hash': file_hash,
-                                    'node_id': current_app.config['NODE_ID_HEX']  # Using hex representation for JSON
+                                    'node_id': current_app.config['NODE_ID_HEX']
                                 }, timeout=2)
                                 response.raise_for_status()
                                 
-                                print(f"Successfully shared {file_name} with {peer}")
+                                print(f"Successfully shared vulnerable chunks of {file_name} with {peer}")
                             except requests.exceptions.RequestException as e:
                                 print(f"Failed to share with {peer}: {str(e)}")
                     
-                    # If we have too many hosts (more than 10), consider removing our copy
-                    elif host_count > 10 and owner == current_app.config['NODE_ID_HEX']:
-                        print(f"File {file_name} has enough hosts ({host_count}), we can stop hosting")
+                    # If health is very high (>8.0) and we're not the owner, consider stopping hosting
+                    elif health > 8.0 and owner != current_app.config['NODE_ID_HEX']:
+                        print(f"File {file_name} has excellent health ({health:.1f}), considering stopping hosting")
+                        # Maybe remove some chunks we're hosting for this file
                 
                 except Exception as e:
                     print(f"Error during maintenance for {file_name}: {str(e)}")
@@ -508,13 +528,56 @@ def maintenance_check():
                         print(f"Failed to check for files from {peer}: {str(e)}")
                         continue
 
+def calculate_file_health(file_hash):
+    """Calculate file health score (1.0 = all chunks have 1 host, 10.0 = all have 10 hosts)"""
+    with app.app_context():
+        db = get_db()
+        cursor = db.cursor()
+        
+        # Get all chunks for this file
+        cursor.execute(
+            'SELECT chunk_hash FROM chunks WHERE file_hash = ?',
+            (file_hash,)
+        )
+        chunks = [row['chunk_hash'] for row in cursor.fetchall()]
+        
+        if not chunks:
+            return 0.0  # No chunks means unhealthy file
+        
+        # Get host count for each chunk
+        chunk_host_counts = []
+        for chunk_hash in chunks:
+            cursor.execute(
+                '''SELECT COUNT(DISTINCT node_id) as host_count 
+                   FROM hosts h
+                   JOIN chunks c ON h.file_hash = c.file_hash
+                   WHERE c.chunk_hash = ?''',
+                (chunk_hash,)
+            )
+            count = cursor.fetchone()['host_count']
+            chunk_host_counts.append(count)
+        
+        min_hosts = min(chunk_host_counts)
+        if min_hosts == 0:
+            return 0.0  # At least one chunk has no hosts
+        
+        avg_hosts = sum(chunk_host_counts) / len(chunk_host_counts)
+        
+        # Calculate health score (capped at 10.0)
+        health = min(avg_hosts, 10.0)
+        
+        # Apply penalty if any chunk has only 1 host (even if average is high)
+        if min_hosts == 1:
+            health = min(health, 1.5)
+        
+        return health
+
 # Routes
 @app.route('/')
 def index():
     with app.app_context():
         files = get_shared_files()
-        # Convert SQLite rows to dictionaries
-        files_data = {row['file_hash']: dict(row) for row in files}
+        files_data = {file['file_hash']: file for file in files}
         return render_template('index.html', 
                             files=files_data, 
                             peer_types=current_app.config['PEER_TYPES'])
