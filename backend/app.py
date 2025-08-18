@@ -257,8 +257,8 @@ def get_shared_files():
         db = get_db()
         cursor = db.cursor()
         cursor.execute('''
-            SELECT f.file_hash, f.original_name, f.display_name, f.game, f.size, f.owner
-            FROM files f
+            SELECT *
+            FROM files
         ''')
         files = cursor.fetchall()
         
@@ -548,8 +548,8 @@ def maintenance_check():
                                 if not cursor.fetchone():
                                     # New file discovered
                                     cursor.execute(
-                                        'INSERT INTO files (file_hash, original_name, display_name, game, size, owner) VALUES (?, ?, ?, ?, ?, ?)',
-                                        (file_hash, file_info['original_name'], file_info['display_name'], file_info['game'], file_info['size'], file_info['owner'])
+                                        'INSERT INTO files (file_hash, original_name, display_name, game, description, password_hash, origin_node, size, owner) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                                        (file_hash, file_info['original_name'], file_info['display_name'], file_info['game'], file_info['description'], file_info['password_hash'], file_info['origin_node'], file_info['size'], file_info['owner'])
                                     )
                                     db.commit()
                                     print(f"Discovered new file from {peer}: {file_info['name']}")
