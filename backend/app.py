@@ -548,7 +548,7 @@ def maintenance_check():
                                 if not cursor.fetchone():
                                     # New file discovered
                                     cursor.execute(
-                                        'INSERT INTO files (file_hash, original_name, diplay_name, size, owner) VALUES (?, ?, ?, ?)',
+                                        'INSERT INTO files (file_hash, original_name, display_name, size, owner) VALUES (?, ?, ?, ?)',
                                         (file_hash, file_info['original_name'], file_info['display_name'], file_info['size'], file_info['owner'])
                                     )
                                     db.commit()
@@ -577,10 +577,10 @@ def calculate_file_health(file_hash):
         chunk_host_counts = []
         for chunk_hash in chunks:
             cursor.execute(
-                '''SELECT COUNT(DISTINCT node_id) as host_count 
-                   FROM hosts h
-                   JOIN chunks c ON h.file_hash = c.file_hash
-                   WHERE c.chunk_hash = ?''',
+                'SELECT COUNT(DISTINCT node_id) as host_count ' \
+                'FROM hosts h '
+                'JOIN chunks c ON h.file_hash = c.file_hash '
+                'WHERE c.chunk_hash = ?',
                 (chunk_hash,)
             )
             count = cursor.fetchone()['host_count']
