@@ -51,6 +51,198 @@ app.config['NODE_ID_HEX'] = app.config['NODE_ID'].hex()  # Hex representation fo
 app.config['MAINTENANCE_INTERVAL'] = 60  # Seconds between maintenance checks
 app.config['DATABASE'] = './database.db'
 
+# Add to configuration section (after existing config)
+app.config['NAT_TRAVERSAL_PORT'] = 5001  # Secondary port for hole punching
+app.config['HOLE_PUNCHING_TIMEOUT'] = 5  # Seconds to wait for hole punching
+app.config['STUN_SERVERS'] = [
+    'stun.l.google.com:19302',
+    'stun1.l.google.com:19302',
+    'stun2.l.google.com:19302',
+    'stun3.l.google.com:19302',
+    'stun4.l.google.com:19302'
+]
+
+# Add this function to get public IP and port mapping
+def get_public_endpoint(stun_server=None):
+    """Get public IP and port using STUN protocol"""
+    import socket
+    import struct
+    
+    if stun_server is None:
+        stun_server = app.config['STUN_SERVERS'][0]
+    
+    server, port = stun_server.split(':')
+    port = int(port)
+    
+    # STUN binding request
+    stun_binding_request = bytes([
+        0x00, 0x01, 0x00, 0x00,  # STUN method: Binding, length: 0
+        0x21, 0x12, 0xA4, 0x42   # Magic cookie
+    ]) + os.urandom(12)  # Transaction ID
+    
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.settimeout(2)
+    
+    try:
+        sock.sendto(stun_binding_request, (server, port))
+        response, addr = sock.recvfrom(1024)
+        
+        # Parse STUN response
+        if len(response) >= 20:
+            # Look for XOR-MAPPED-ADDRESS attribute (0x0020)
+            pos = 20  # Skip STUN header
+            while pos + 4 <= len(response):
+                attr_type = struct.unpack('!H', response[pos:pos+2])[0]
+                attr_length = struct.unpack('!H', response[pos+2:pos+4])[0]
+                
+                if attr_type == 0x0020 and pos + 4 + attr_length <= len(response):  # XOR-MAPPED-ADDRESS
+                    # Parse XOR-MAPPED-ADDRESS
+                    family = struct.unpack('!B', response[pos+5:pos+6])[0]
+                    if family == 0x01:  # IPv4
+                        xport = struct.unpack('!H', response[pos+6:pos+8])[0]
+                        xip = struct.unpack('!I', response[pos+8:pos+12])[0]
+                        
+                        # XOR with magic cookie
+                        magic_cookie = 0x2112A442
+                        port = xport ^ (magic_cookie >> 16)
+                        ip = xip ^ magic_cookie
+                        
+                        public_ip = socket.inet_ntoa(struct.pack('!I', ip))
+                        return f"{public_ip}:{port}"
+                
+                pos += 4 + attr_length
+        
+        # Fallback: just return the address we received from
+        return f"{addr[0]}:{addr[1]}"
+        
+    except (socket.timeout, socket.error):
+        return None
+    finally:
+        sock.close()
+
+# Add hole punching coordination function
+def coordinate_hole_punching(target_peer, file_hash=None, chunk_hash=None):
+    """Coordinate hole punching with another peer"""
+    try:
+        # Get our public endpoint
+        public_endpoint = get_public_endpoint()
+        if not public_endpoint:
+            return False
+        
+        # Contact target peer to initiate hole punching
+        response = requests.post(
+            f"{target_peer}/initiate_punch",
+            json={
+                'requester': public_endpoint,
+                'file_hash': file_hash,
+                'chunk_hash': chunk_hash,
+                'timestamp': time.time()
+            },
+            timeout=3
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
+            target_public = data.get('public_endpoint')
+            
+            if target_public:
+                # Now both peers know each other's public endpoints
+                # Try to establish direct connection
+                return attempt_direct_connection(target_public, file_hash, chunk_hash)
+        
+        return False
+        
+    except requests.exceptions.RequestException:
+        return False
+
+def attempt_direct_connection(target_endpoint, file_hash=None, chunk_hash=None):
+    """Attempt to establish direct UDP connection"""
+    import socket
+    
+    try:
+        ip, port = target_endpoint.split(':')
+        port = int(port)
+        
+        # Create UDP socket for hole punching
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.settimeout(app.config['HOLE_PUNCHING_TIMEOUT'])
+        
+        # Send punch packet
+        punch_data = json.dumps({
+            'type': 'punch',
+            'node_id': app.config['NODE_ID_HEX'],
+            'file_hash': file_hash,
+            'chunk_hash': chunk_hash
+        }).encode()
+        
+        sock.sendto(punch_data, (ip, port))
+        
+        # Wait for response
+        try:
+            data, addr = sock.recvfrom(1024)
+            if data:
+                response = json.loads(data.decode())
+                if response.get('type') == 'punch_ack':
+                    print(f"Hole punching successful with {target_endpoint}")
+                    return True
+        except socket.timeout:
+            pass
+        
+        return False
+        
+    except (ValueError, socket.error, json.JSONDecodeError):
+        return False
+
+# Add this function to handle direct chunk transfers
+def transfer_chunk_via_p2p(target_endpoint, chunk_hash):
+    """Transfer chunk directly via established P2P connection"""
+    import socket
+    
+    try:
+        ip, port = target_endpoint.split(':')
+        port = int(port)
+        
+        chunk_path = os.path.join(app.config['UPLOAD_FOLDER'], f"{chunk_hash}.chunk")
+        if not os.path.exists(chunk_path):
+            return False
+        
+        # Read chunk data
+        with open(chunk_path, 'rb') as f:
+            chunk_data = f.read()
+        
+        # Create socket and send chunk
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.settimeout(5)
+        
+        # Send metadata first
+        metadata = json.dumps({
+            'type': 'chunk_transfer',
+            'chunk_hash': chunk_hash,
+            'size': len(chunk_data),
+            'timestamp': time.time()
+        }).encode()
+        
+        sock.sendto(metadata, (ip, port))
+        
+        # Wait for acknowledgment
+        try:
+            data, addr = sock.recvfrom(1024)
+            if data and json.loads(data.decode()).get('type') == 'ready':
+                # Send chunk data
+                sock.sendto(chunk_data, (ip, port))
+                
+                # Wait for completion acknowledgment
+                data, addr = sock.recvfrom(1024)
+                if data and json.loads(data.decode()).get('type') == 'complete':
+                    return True
+        except socket.timeout:
+            pass
+        
+        return False
+        
+    except (ValueError, socket.error, json.JSONDecodeError, IOError):
+        return False
+
 # Database setup with node ID as salt
 def get_db():
     db = getattr(g, '_database', None)
@@ -329,6 +521,139 @@ def categorize_peer(peer_address, peer_type):
         )
         db.commit()
 
+# Add these routes after existing routes
+
+@app.route('/initiate_punch', methods=['POST'])
+def initiate_punch():
+    """Initiate hole punching process"""
+    data = request.get_json()
+    if not data or 'requester' not in data:
+        return jsonify({'status': 'error'}), 400
+    
+    requester_endpoint = data['requester']
+    
+    # Get our public endpoint
+    public_endpoint = get_public_endpoint()
+    if not public_endpoint:
+        return jsonify({'status': 'error'}), 500
+    
+    # Start hole punching thread
+    thread = threading.Thread(
+        target=perform_hole_punching,
+        args=(requester_endpoint, data.get('file_hash'), data.get('chunk_hash'))
+    )
+    thread.daemon = True
+    thread.start()
+    
+    return jsonify({
+        'status': 'success',
+        'public_endpoint': public_endpoint
+    })
+
+def perform_hole_punching(target_endpoint, file_hash=None, chunk_hash=None):
+    """Perform the actual hole punching"""
+    import socket
+    import time
+    
+    try:
+        ip, port = target_endpoint.split(':')
+        port = int(port)
+        
+        # Create UDP socket
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.settimeout(app.config['HOLE_PUNCHING_TIMEOUT'])
+        
+        # Send multiple punch packets (NATs may drop first packets)
+        for i in range(3):
+            punch_data = json.dumps({
+                'type': 'punch_ack',
+                'node_id': app.config['NODE_ID_HEX'],
+                'file_hash': file_hash,
+                'chunk_hash': chunk_hash
+            }).encode()
+            
+            sock.sendto(punch_data, (ip, port))
+            time.sleep(0.5)
+        
+        # If we have a chunk to transfer, do it now
+        if chunk_hash and file_hash:
+            chunk_path = os.path.join(app.config['UPLOAD_FOLDER'], f"{chunk_hash}.chunk")
+            if os.path.exists(chunk_path):
+                transfer_chunk_via_p2p(target_endpoint, chunk_hash)
+        
+        return True
+        
+    except (ValueError, socket.error):
+        return False
+
+@app.route('/udp_listener', methods=['POST'])
+def start_udp_listener():
+    """Start UDP listener for hole punching (optional endpoint)"""
+    thread = threading.Thread(target=udp_listener)
+    thread.daemon = True
+    thread.start()
+    return jsonify({'status': 'listener_started'})
+
+def udp_listener():
+    """UDP listener for hole punching and direct transfers"""
+    import socket
+    import json
+    
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.bind(('0.0.0.0', app.config['NAT_TRAVERSAL_PORT']))
+    sock.settimeout(1)
+    
+    print(f"UDP listener started on port {app.config['NAT_TRAVERSAL_PORT']}")
+    
+    while True:
+        try:
+            data, addr = sock.recvfrom(65535)
+            if data:
+                try:
+                    message = json.loads(data.decode())
+                    message_type = message.get('type')
+                    
+                    if message_type == 'punch':
+                        # Acknowledge punch
+                        ack = json.dumps({
+                            'type': 'punch_ack',
+                            'node_id': app.config['NODE_ID_HEX']
+                        }).encode()
+                        sock.sendto(ack, addr)
+                        
+                    elif message_type == 'chunk_transfer':
+                        # Prepare to receive chunk
+                        chunk_hash = message['chunk_hash']
+                        chunk_size = message['size']
+                        
+                        # Send ready signal
+                        ready = json.dumps({'type': 'ready'}).encode()
+                        sock.sendto(ready, addr)
+                        
+                        # Receive chunk data
+                        data, addr = sock.recvfrom(chunk_size + 1024)
+                        if data:
+                            # Save chunk
+                            chunk_path = os.path.join(
+                                app.config['UPLOAD_FOLDER'], 
+                                f"{chunk_hash}.chunk"
+                            )
+                            with open(chunk_path, 'wb') as f:
+                                f.write(data)
+                            
+                            # Send completion acknowledgment
+                            complete = json.dumps({'type': 'complete'}).encode()
+                            sock.sendto(complete, addr)
+                            
+                except json.JSONDecodeError:
+                    continue
+                    
+        except socket.timeout:
+            continue
+        except Exception as e:
+            print(f"UDP listener error: {e}")
+            time.sleep(1)
+
 @app.route('/add_peer', methods=['POST'])
 def add_peer():
     peer_address = request.form.get('peer_address')
@@ -494,31 +819,36 @@ def maintenance_check():
                                 )
                                 response.raise_for_status()
                                 
-                                # Then send missing chunks
                                 for chunk_hash in missing_chunks:
                                     chunk_path = os.path.join(current_app.config['UPLOAD_FOLDER'], f"{chunk_hash}.chunk")
                                     if os.path.exists(chunk_path):
-                                        with open(chunk_path, 'rb') as f:
-                                            files = {'chunk': (f"{chunk_hash}.chunk", f)}
-                                            response = requests.post(
-                                                f"{peer}/upload_chunk",
-                                                files=files,
-                                                timeout=5
-                                            )
-                                            response.raise_for_status()
+                                        try:
+                                            with open(chunk_path, 'rb') as f:
+                                                files = {'chunk': (f"{chunk_hash}.chunk", f)}
+                                                response = requests.post(
+                                                    f"{peer}/upload_chunk",
+                                                    files=files,
+                                                    timeout=10
+                                                )
+                                                response.raise_for_status()
+                                                success = True
+                                        except requests.exceptions.RequestException:
+                                            # HTTP failed, try hole punching
+                                            if coordinate_hole_punching(peer, file_hash, chunk_hash):
+                                                success = True
                                 
-                                # Register that this peer is now hosting the file
-                                response = requests.post(
-                                    f"{peer}/register_hosting",
-                                    json={
-                                        'file_hash': file_hash,
-                                        'node_id': current_app.config['NODE_ID_HEX']
-                                    },
-                                    timeout=2
-                                )
-                                response.raise_for_status()
-                                
-                                print(f"Successfully shared vulnerable chunks of {file_name} with {peer}")
+                                if success:
+                                    # Register that this peer is now hosting the file
+                                    response = requests.post(
+                                        f"{peer}/register_hosting",
+                                        json={
+                                            'file_hash': file_hash,
+                                            'node_id': current_app.config['NODE_ID_HEX']
+                                        },
+                                        timeout=2
+                                    )
+                                    print(f"Successfully shared vulnerable chunks of {file_name} with {peer}")
+                                    
                             except requests.exceptions.RequestException as e:
                                 print(f"Failed to share with {peer}: {str(e)}")
                     
@@ -662,6 +992,7 @@ def generate_download_stream(file_hash):
                     yield chunk_file.read()
                 continue
                 
+            
             # Try to fetch chunk from peers - friends first, then peers, then strangers
             chunk_found = False
             for peer_type in ['friends', 'peers', 'strangers']:
@@ -679,10 +1010,20 @@ def generate_download_stream(file_hash):
                             chunk_found = True
                             break
                     except requests.exceptions.RequestException:
-                        continue
+                        # HTTP failed, try hole punching
+                        try:
+                            if coordinate_hole_punching(peer, file_hash, chunk_hash):
+                                # If hole punching succeeded, check if chunk is now available locally
+                                if os.path.exists(os.path.join(current_app.config['UPLOAD_FOLDER'], f"{chunk_hash}.chunk")):
+                                    with open(os.path.join(current_app.config['UPLOAD_FOLDER'], f"{chunk_hash}.chunk"), 'rb') as f:
+                                        yield f.read()
+                                    chunk_found = True
+                                    break
+                        except Exception as e:
+                            print(f"Hole punching failed for {peer}: {e}")
+                            continue
                 if chunk_found:
                     break
-            
             if not chunk_found:
                 raise FileNotFoundError(f"Missing chunk {chunk_hash} for file {file_hash}")
 
@@ -1118,5 +1459,10 @@ if __name__ == '__main__':
     
     # Start maintenance thread
     start_maintenance_thread()
+    
+    # Start UDP listener for hole punching
+    udp_thread = threading.Thread(target=udp_listener)
+    udp_thread.daemon = True
+    udp_thread.start()
     
     app.run(debug=True, host='0.0.0.0', port=5000)
