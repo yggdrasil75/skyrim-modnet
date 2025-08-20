@@ -586,13 +586,13 @@ def perform_hole_punching(target_endpoint, file_hash=None, chunk_hash=None):
     except (ValueError, socket.error):
         return False
 
-@app.route('/udp_listener', methods=['POST'])
-def start_udp_listener():
-    """Start UDP listener for hole punching (optional endpoint)"""
-    thread = threading.Thread(target=udp_listener)
-    thread.daemon = True
-    thread.start()
-    return jsonify({'status': 'listener_started'})
+# @app.route('/udp_listener', methods=['POST'])
+# def start_udp_listener():
+#     """Start UDP listener for hole punching (optional endpoint)"""
+#     thread = threading.Thread(target=udp_listener)
+#     thread.daemon = True
+#     thread.start()
+#     return jsonify({'status': 'listener_started'})
 
 def udp_listener():
     """UDP listener for hole punching and direct transfers"""
