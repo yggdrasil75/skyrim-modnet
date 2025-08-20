@@ -52,7 +52,7 @@ app.config['MAINTENANCE_INTERVAL'] = 60  # Seconds between maintenance checks
 app.config['DATABASE'] = './database.db'
 
 # Add to configuration section (after existing config)
-app.config['NAT_TRAVERSAL_PORT'] = 5001  # Secondary port for hole punching
+app.config['NAT_TRAVERSAL_PORT'] = 42441  # Secondary port for hole punching
 app.config['HOLE_PUNCHING_TIMEOUT'] = 5  # Seconds to wait for hole punching
 app.config['STUN_SERVERS'] = [
     'stun.l.google.com:19302',
