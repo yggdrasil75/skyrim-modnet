@@ -202,19 +202,19 @@ def download_chunk_with_fallback(chunk_hash, file_hash=None):
     
     raise FileNotFoundError(f"Missing chunk {chunk_hash}")
 
-# Add an endpoint to check if we have a specific chunk
+# Add an endpoint to check chunk hosting
 @app.route('/has_chunk/<chunk_hash>')
 def has_chunk(chunk_hash):
     chunk_path = os.path.join(current_app.config['UPLOAD_FOLDER'], f"{chunk_hash}.chunk")
     if os.path.exists(chunk_path):
         return jsonify({'has_chunk': True})
     
-    # Also check database
+    # Check database for chunk hosting registration
     db = get_db()
     cursor = db.cursor()
     cursor.execute(
-        'SELECT 1 FROM chunks WHERE chunk_hash = ?',
-        (chunk_hash,)
+        'SELECT 1 FROM chunk_hosts WHERE chunk_hash = ? AND node_id = ?',
+        (chunk_hash, current_app.config['NODE_ID_HEX'])
     )
     if cursor.fetchone():
         return jsonify({'has_chunk': True})
@@ -524,12 +524,26 @@ def init_db():
         )
         ''')
         
+        # Old hosts table (for backward compatibility)
         cursor.execute('''
         CREATE TABLE IF NOT EXISTS hosts (
             file_hash TEXT NOT NULL,
             node_id TEXT NOT NULL,
             timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
             PRIMARY KEY (file_hash, node_id),
+            FOREIGN KEY (file_hash) REFERENCES files (file_hash)
+        )
+        ''')
+        
+        # New chunk_hosts table for chunk-level hosting
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS chunk_hosts (
+            chunk_hash TEXT NOT NULL,
+            node_id TEXT NOT NULL,
+            file_hash TEXT NOT NULL,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (chunk_hash, node_id),
+            FOREIGN KEY (chunk_hash) REFERENCES chunks (chunk_hash),
             FOREIGN KEY (file_hash) REFERENCES files (file_hash)
         )
         ''')
@@ -541,6 +555,46 @@ def init_db():
             last_seen DATETIME DEFAULT CURRENT_TIMESTAMP
         )
         ''')
+        
+        # Migrate old data if needed
+        try:
+            # Check if chunk_hosts table is empty but hosts table has data
+            cursor.execute('SELECT COUNT(*) as count FROM chunk_hosts')
+            chunk_hosts_count = cursor.fetchone()['count']
+            
+            if chunk_hosts_count == 0:
+                cursor.execute('SELECT COUNT(*) as count FROM hosts')
+                hosts_count = cursor.fetchone()['count']
+                
+                if hosts_count > 0:
+                    print("Migrating old hosting data to new chunk-level format...")
+                    # For each file in hosts, assume the node hosts all chunks of that file
+                    cursor.execute('SELECT file_hash, node_id FROM hosts')
+                    for row in cursor.fetchall():
+                        file_hash = row['file_hash']
+                        node_id = row['node_id']
+                        
+                        # Get all chunks for this file
+                        cursor.execute(
+                            'SELECT chunk_hash FROM chunks WHERE file_hash = ?',
+                            (file_hash,)
+                        )
+                        chunks = cursor.fetchall()
+                        
+                        for chunk_row in chunks:
+                            chunk_hash = chunk_row['chunk_hash']
+                            # Insert into chunk_hosts
+                            cursor.execute(
+                                'INSERT OR IGNORE INTO chunk_hosts (chunk_hash, node_id, file_hash) VALUES (?, ?, ?)',
+                                (chunk_hash, node_id, file_hash)
+                            )
+                    
+                    db.commit()
+                    print("Migration completed successfully")
+                    
+        except sqlite3.Error as e:
+            print(f"Error during migration: {e}")
+            db.rollback()
         
         db.commit()
 
@@ -655,30 +709,77 @@ def broadcast_to_peers(data, endpoint):
                 print("broadcast_to_peers failed at fail point 1")
                 continue
 
-def register_hosting(file_hash, node_id=None):
-    """Register that this node is hosting a file"""
+def register_hosting(file_hash, node_id=None, chunk_hashes=None):
+    """Register that this node is hosting a file or specific chunks"""
     with app.app_context():
         if node_id is None:
-            node_id = current_app.config['NODE_ID']
+            node_id = current_app.config['NODE_ID_HEX']  # Use hex representation
         
         db = get_db()
         cursor = db.cursor()
-        cursor.execute(
-            'INSERT OR REPLACE INTO hosts (file_hash, node_id) VALUES (?, ?)',
-            (file_hash, node_id)
-        )
+        
+        if chunk_hashes is None:
+            # Register hosting for all chunks of the file (backward compatibility)
+            cursor.execute(
+                'INSERT OR REPLACE INTO hosts (file_hash, node_id) VALUES (?, ?)',
+                (file_hash, node_id)
+            )
+            
+            # Also register for all chunks individually
+            cursor.execute(
+                'SELECT chunk_hash FROM chunks WHERE file_hash = ?',
+                (file_hash,)
+            )
+            chunks = [row['chunk_hash'] for row in cursor.fetchall()]
+            
+            for chunk_hash in chunks:
+                cursor.execute(
+                    'INSERT OR REPLACE INTO chunk_hosts (chunk_hash, node_id, file_hash) VALUES (?, ?, ?)',
+                    (chunk_hash, node_id, file_hash)
+                )
+        else:
+            # Register hosting for specific chunks only
+            for chunk_hash in chunk_hashes:
+                cursor.execute(
+                    'INSERT OR REPLACE INTO chunk_hosts (chunk_hash, node_id, file_hash) VALUES (?, ?, ?)',
+                    (chunk_hash, node_id, file_hash)
+                )
+        
         db.commit()
 
+# Update the get_file_hosts function to use chunk-level information
 def get_file_hosts(file_hash):
-    """Get all nodes hosting a specific file"""
+    """Get all nodes hosting a specific file, based on chunk availability"""
     with app.app_context():
         db = get_db()
         cursor = db.cursor()
+        
+        # Get all chunks for this file
         cursor.execute(
-            'SELECT node_id FROM hosts WHERE file_hash = ?',
+            'SELECT chunk_hash FROM chunks WHERE file_hash = ?',
             (file_hash,)
         )
-        return [row['node_id'] for row in cursor.fetchall()]
+        chunks = [row['chunk_hash'] for row in cursor.fetchall()]
+        
+        if not chunks:
+            return []
+        
+        # For each chunk, find hosts and calculate file-level hosting
+        chunk_hosts = {}
+        for chunk_hash in chunks:
+            cursor.execute(
+                'SELECT node_id FROM chunk_hosts WHERE chunk_hash = ?',
+                (chunk_hash,)
+            )
+            hosts = [row['node_id'] for row in cursor.fetchall()]
+            chunk_hosts[chunk_hash] = hosts
+        
+        # A node is considered to host the file if it has at least one chunk
+        all_hosts = set()
+        for hosts in chunk_hosts.values():
+            all_hosts.update(hosts)
+        
+        return list(all_hosts)
 
 def get_shared_files():
     """Get all files shared in the network with health scores"""
@@ -757,7 +858,6 @@ def categorize_peer(peer_address, peer_type):
             (peer_address, peer_type)
         )
         db.commit()
-
 
 @app.route('/initiate_punch', methods=['POST'])
 def initiate_punch():
@@ -935,6 +1035,17 @@ def udp_listener():
                 print(f"UDP listener error: {e}")
                 time.sleep(1)
 
+# Add a function to get hosts for specific chunks
+def get_chunk_hosts(chunk_hash):
+    """Get all nodes hosting a specific chunk"""
+    with app.app_context():
+        db = get_db()
+        cursor = db.cursor()
+        cursor.execute(
+            'SELECT node_id FROM chunk_hosts WHERE chunk_hash = ?',
+            (chunk_hash,)
+        )
+        return [row['node_id'] for row in cursor.fetchall()]
 
 # Add a new endpoint for remote peer addition (to avoid circular notifications)
 @app.route('/add_peer_remote', methods=['POST'])
@@ -1044,7 +1155,7 @@ def set_peer_type():
     except ValueError as e:
         return str(e), 400
 
-# Update the maintenance_check function to handle mutual peer relationships
+# Update the maintenance_check function to use chunk-level operations
 def maintenance_check():
     """Periodically check file health and use relay if needed"""
     os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
@@ -1110,18 +1221,17 @@ def maintenance_check():
                     # If health is below 3.0, we need to share more chunks
                     if health < 3.0:
                         print(f"File {file_name} needs health improvement (current: {health:.1f})")
-                        
-                        # Get vulnerable chunks
+                    
+                        # Get vulnerable chunks with their host counts
                         cursor.execute('''
-                            SELECT c.chunk_hash, COUNT(DISTINCT h.node_id) as host_count
+                            SELECT c.chunk_hash, COUNT(DISTINCT ch.node_id) as host_count
                             FROM chunks c
-                            LEFT JOIN hosts h ON c.chunk_hash = h.chunk_hash
+                            LEFT JOIN chunk_hosts ch ON c.chunk_hash = ch.chunk_hash
                             WHERE c.file_hash = ?
                             GROUP BY c.chunk_hash
                             HAVING host_count < 3
                             ORDER BY host_count ASC
                             LIMIT 5
-
                         ''', (file_hash,))
                         vulnerable_chunks = cursor.fetchall()
                         
@@ -1282,8 +1392,9 @@ def maintenance_check():
                         print(f"Failed to check for files from {peer}: {str(e)}")
                         continue
 
+# Update the calculate_file_health function to use chunk-level hosting data
 def calculate_file_health(file_hash):
-    """Calculate file health score (1.0 = all chunks have 1 host, 10.0 = all have 10 hosts)"""
+    """Calculate file health score based on chunk-level hosting"""
     with app.app_context():
         db = get_db()
         cursor = db.cursor()
@@ -1298,14 +1409,11 @@ def calculate_file_health(file_hash):
         if not chunks:
             return 0.0  # No chunks means unhealthy file
         
-        # Get host count for each chunk
+        # Get host count for each chunk from chunk_hosts table
         chunk_host_counts = []
         for chunk_hash in chunks:
             cursor.execute(
-                'SELECT COUNT(DISTINCT node_id) as host_count ' \
-                'FROM hosts h '
-                'JOIN chunks c ON h.file_hash = c.file_hash '
-                'WHERE c.chunk_hash = ?',
+                'SELECT COUNT(DISTINCT node_id) as host_count FROM chunk_hosts WHERE chunk_hash = ?',
                 (chunk_hash,)
             )
             count = cursor.fetchone()['host_count']
@@ -1825,9 +1933,6 @@ def upload_chunk():
         print("upload chunk failed at breakpoint 1")
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
-
-
-
 @app.route('/shared_files')
 def list_shared_files():
     with app.app_context():
@@ -1838,7 +1943,8 @@ def list_shared_files():
 def api_register_hosting():
     data = request.json
     if data and 'file_hash' in data:
-        register_hosting(data['file_hash'])
+        chunk_hashes = data.get('chunk_hashes')  # Optional: specific chunks
+        register_hosting(data['file_hash'], data.get('node_id'), chunk_hashes)
         return jsonify({'status': 'success'})
     return jsonify({'status': 'error'}), 400
 
