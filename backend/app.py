@@ -12,6 +12,8 @@ import time
 import struct
 import json
 
+udpon = False
+
 app = Flask(__name__, template_folder="../templates")
 
 app.config['PEER_TYPES'] = {
@@ -63,8 +65,69 @@ app.config['STUN_SERVERS'] = [
     'stun1.l.google.com:19302',
     'stun2.l.google.com:19302',
     'stun3.l.google.com:19302',
-    'stun4.l.google.com:19302'
+    'stun4.l.google.com:19302',
+    'stun.stunprotocol.org:3478',
+    'stun.voip.blackberry.com:3478',
+    'stun.iptel.org:3478',
+    'stun.ideasip.com:3478'
 ]
+
+def download_chunk_with_relay(chunk_hash, file_hash=None):
+    """Download a chunk using public node as relay if direct connection fails"""
+    chunk_path = os.path.join(current_app.config['UPLOAD_FOLDER'], f"{chunk_hash}.chunk")
+    
+    # Try local chunk first
+    if os.path.exists(chunk_path):
+        with open(chunk_path, 'rb') as f:
+            return f.read()
+    
+    # Try direct download from peers in priority order
+    for peer_type in ['friends', 'peers', 'strangers']:
+        for peer in current_app.config['PEER_TYPES'][peer_type]:
+            try:
+                response = requests.get(f"{peer}/chunk/{chunk_hash}", timeout=5)
+                if response.status_code == 200:
+                    chunk_data = response.content
+                    with open(chunk_path, 'wb') as f:
+                        f.write(chunk_data)
+                    return chunk_data
+            except requests.exceptions.RequestException:
+                continue
+    
+    # If direct download fails, use public node as relay to find the chunk
+    for public_peer in current_app.config['DEFAULT_PEERS']:
+        try:
+            # Ask public node to find which peers have this chunk
+            response = requests.post(
+                f"{public_peer}/find_chunk",
+                json={'chunk_hash': chunk_hash},
+                timeout=5
+            )
+            
+            if response.status_code == 200:
+                chunk_hosts = response.json().get('hosts', [])
+                
+                # Try each host that has the chunk
+                for host_peer in chunk_hosts:
+                    try:
+                        # Use public node as relay for the request
+                        relay_response = requests.get(
+                            f"{public_peer}/relay_chunk/{chunk_hash}",
+                            params={'source_peer': host_peer},
+                            timeout=10
+                        )
+                        
+                        if relay_response.status_code == 200:
+                            chunk_data = relay_response.content
+                            with open(chunk_path, 'wb') as f:
+                                f.write(chunk_data)
+                            return chunk_data
+                    except requests.exceptions.RequestException:
+                        continue
+        except requests.exceptions.RequestException:
+            continue
+    
+    raise FileNotFoundError(f"Missing chunk {chunk_hash}")
 
 # Add this function to handle chunk downloads with hole punching fallback
 def download_chunk_with_fallback(chunk_hash, file_hash=None):
@@ -121,61 +184,119 @@ def has_chunk(chunk_hash):
     
     return jsonify({'has_chunk': False})
 
-# Add this function to get public IP and port mapping
-def get_public_endpoint(stun_server=None):
-    """Get public IP and port using STUN protocol"""
+@app.route('/find_chunk', methods=['POST'])
+def find_chunk():
+    """Find which peers have a specific chunk"""
+    data = request.get_json()
+    chunk_hash = data.get('chunk_hash')
     
-    if stun_server is None:
-        stun_server = app.config['STUN_SERVERS'][0]
+    if not chunk_hash:
+        return jsonify({'error': 'Missing chunk_hash'}), 400
     
-    server, port = stun_server.split(':')
-    port = int(port)
+    hosts = []
     
-    # STUN binding request
-    stun_binding_request = bytes([
-        0x00, 0x01, 0x00, 0x00,  # STUN method: Binding, length: 0
-        0x21, 0x12, 0xA4, 0x42   # Magic cookie
-    ]) + os.urandom(12)  # Transaction ID
+    # Check all known peers (friends first, then peers, then strangers)
+    for peer_type in ['friends', 'peers', 'strangers']:
+        for peer in current_app.config['PEER_TYPES'][peer_type]:
+            try:
+                response = requests.get(
+                    f"{peer}/has_chunk/{chunk_hash}",
+                    timeout=3
+                )
+                if response.status_code == 200 and response.json().get('has_chunk'):
+                    hosts.append(peer)
+            except requests.exceptions.RequestException:
+                continue
     
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.settimeout(2)
+    return jsonify({'chunk_hash': chunk_hash, 'hosts': hosts})
+
+@app.route('/relay_chunk/<chunk_hash>')
+def relay_chunk(chunk_hash):
+    """Relay a chunk request from one peer to another"""
+    source_peer = request.args.get('source_peer')
+    
+    if not source_peer:
+        return jsonify({'error': 'Missing source_peer parameter'}), 400
     
     try:
-        sock.sendto(stun_binding_request, (server, port))
-        response, addr = sock.recvfrom(1024)
+        # Forward the request to the source peer
+        response = requests.get(
+            f"{source_peer}/chunk/{chunk_hash}",
+            timeout=10,
+            stream=True
+        )
         
-        # Parse STUN response
-        if len(response) >= 20:
-            # Look for XOR-MAPPED-ADDRESS attribute (0x0020)
-            pos = 20  # Skip STUN header
-            while pos + 4 <= len(response):
-                attr_type = struct.unpack('!H', response[pos:pos+2])[0]
-                attr_length = struct.unpack('!H', response[pos+2:pos+4])[0]
-                
-                if attr_type == 0x0020 and pos + 4 + attr_length <= len(response):  # XOR-MAPPED-ADDRESS
-                    # Parse XOR-MAPPED-ADDRESS
-                    family = struct.unpack('!B', response[pos+5:pos+6])[0]
-                    if family == 0x01:  # IPv4
-                        xport = struct.unpack('!H', response[pos+6:pos+8])[0]
-                        xip = struct.unpack('!I', response[pos+8:pos+12])[0]
-                        
-                        # XOR with magic cookie
-                        magic_cookie = 0x2112A442
-                        port = xport ^ (magic_cookie >> 16)
-                        ip = xip ^ magic_cookie
-                        
-                        public_ip = socket.inet_ntoa(struct.pack('!I', ip))
-                        return f"{public_ip}:{port}"
-                
-                pos += 4 + attr_length
-        
-        # Fallback: just return the address we received from
-        return f"{addr[0]}:{addr[1]}"
-        
-    except (socket.timeout, socket.error):
-        return None
-    finally:
-        sock.close()
+        if response.status_code == 200:
+            # Stream the response back to the requester
+            def generate():
+                for chunk in response.iter_content(chunk_size=8192):
+                    yield chunk
+            
+            return Response(generate(), mimetype='application/octet-stream')
+        else:
+            return jsonify({'error': 'Chunk not found on source peer'}), 404
+            
+    except requests.exceptions.RequestException as e:
+        return jsonify({'error': f'Relay failed: {str(e)}'}), 500
+    
+# Add this function to get public IP and port mapping
+def get_public_endpoint(stun_servers=None):
+    """Get public IP and port using STUN protocol"""
+    
+    if stun_servers is None:
+        stun_servers = app.config['STUN_SERVERS'][0]
+    
+    for stun_server in stun_servers:
+        try:
+            server, port = stun_server.split(':')
+            port = int(port)
+            
+            # STUN binding request
+            stun_binding_request = bytes([
+                0x00, 0x01, 0x00, 0x00,  # STUN method: Binding, length: 0
+                0x21, 0x12, 0xA4, 0x42   # Magic cookie
+            ]) + os.urandom(12)  # Transaction ID
+            
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.settimeout(2)
+            
+            sock.sendto(stun_binding_request, (server, port))
+            response, addr = sock.recvfrom(1024)
+            
+            # Parse STUN response
+            if len(response) >= 20:
+                # Look for XOR-MAPPED-ADDRESS attribute (0x0020)
+                pos = 20
+                while pos + 4 <= len(response):
+                    attr_type = struct.unpack('!H', response[pos:pos+2])[0]
+                    attr_length = struct.unpack('!H', response[pos+2:pos+4])[0]
+                    
+                    if attr_type == 0x0020 and pos + 4 + attr_length <= len(response):
+                        family = struct.unpack('!B', response[pos+5:pos+6])[0]
+                        if family == 0x01:  # IPv4
+                            xport = struct.unpack('!H', response[pos+6:pos+8])[0]
+                            xip = struct.unpack('!I', response[pos+8:pos+12])[0]
+                            
+                            magic_cookie = 0x2112A442
+                            port = xport ^ (magic_cookie >> 16)
+                            ip = xip ^ magic_cookie
+                            
+                            public_ip = socket.inet_ntoa(struct.pack('!I', ip))
+                            return f"{public_ip}:{port}"
+                    
+                    pos += 4 + attr_length
+            
+            return f"{addr[0]}:{addr[1]}"
+            
+        except (socket.timeout, socket.error):
+            continue
+        finally:
+            try:
+                sock.close()
+            except:
+                pass
+    
+    return None
 
 # Update the coordinate_hole_punching function to handle chunk transfers
 def coordinate_hole_punching(target_peer, file_hash=None, chunk_hash=None):
@@ -666,10 +787,14 @@ def start_udp_listener():
 
 # Update the UDP listener to handle chunk transfers
 def udp_listener():
+    global udpon
+    if udpon:
+        return
     """UDP listener for hole punching and direct transfers"""
     
     # Create application context for this thread
     with app.app_context():
+        updon = True
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.bind(('0.0.0.0', current_app.config['NAT_TRAVERSAL_PORT']))
         sock.settimeout(1)
@@ -742,6 +867,7 @@ def udp_listener():
                 except json.JSONDecodeError:
                     # This is likely chunk data, not a JSON message
                     # Check if it belongs to any ongoing transfer
+                    udpon = False
                     for chunk_hash, buffer_info in chunk_buffers.items():
                         if addr == buffer_info['addr']:
                             buffer_info['data'].extend(data)
@@ -750,6 +876,7 @@ def udp_listener():
                             break
             
             except socket.timeout:
+                udpon = False
                 # Clean up stale buffers
                 current_time = time.time()
                 stale_chunks = []
@@ -761,6 +888,7 @@ def udp_listener():
                     del chunk_buffers[chunk_hash]
                     
             except Exception as e:
+                udpon = False
                 print(f"UDP listener error: {e}")
                 time.sleep(1)
 
@@ -821,181 +949,90 @@ def set_peer_type():
         return str(e), 400
 
 def maintenance_check():
-    """Periodically check file health and redistribute as needed"""
-    os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+    """Periodically check file health and use relay if needed"""
     with app.app_context():
         while True:
             time.sleep(current_app.config['MAINTENANCE_INTERVAL'])
-            print(f"[{datetime.now()}] Running maintenance check...")
             
-            # Get all peers in priority order: friends first, then peers, then strangers
-            all_peers = (
-                list(current_app.config['PEER_TYPES']['friends']) +
-                list(current_app.config['PEER_TYPES']['peers']) +
-                list(current_app.config['PEER_TYPES']['strangers'])
-            )
+            # Get public peers for relay functionality
+            public_peers = list(current_app.config['DEFAULT_PEERS'])
             
             # Check each file's health
             db = get_db()
             cursor = db.cursor()
-            cursor.execute('SELECT file_hash, original_name, display_name, owner FROM files')
+            cursor.execute('SELECT file_hash, display_name, owner FROM files')
             files = cursor.fetchall()
             
             for file in files:
                 file_hash = file['file_hash']
                 file_name = file['display_name']
-                owner = file['owner']
                 
                 try:
                     health = calculate_file_health(file_hash)
-                    print(f"File {file_name} has health score: {health:.1f}")
                     
-                    # If health is below 3.0, we need to share more chunks
-                    if health < 3.0:
-                        print(f"File {file_name} needs health improvement (current: {health:.1f})")
-                        
-                        # Get chunks with lowest host counts
+                    if health < 3.0:  # File needs more replication
+                        # Get vulnerable chunks
                         cursor.execute('''
                             SELECT c.chunk_hash, COUNT(DISTINCT h.node_id) as host_count
                             FROM chunks c
-                            LEFT JOIN hosts h ON c.file_hash = h.file_hash
+                            LEFT JOIN hosts h ON c.chunk_hash = h.chunk_hash
                             WHERE c.file_hash = ?
                             GROUP BY c.chunk_hash
+                            HAVING host_count < 3
                             ORDER BY host_count ASC
                             LIMIT 5
                         ''', (file_hash,))
                         vulnerable_chunks = cursor.fetchall()
                         
-                        if not vulnerable_chunks:
-                            continue
+                        for chunk_row in vulnerable_chunks:
+                            chunk_hash = chunk_row['chunk_hash']
                             
-                        vulnerable_chunk_hashes = [row['chunk_hash'] for row in vulnerable_chunks]
-                        
-                        # Find peers that don't have these chunks yet
-                        candidates = []
-                        for peer in all_peers:
-                            try:
-                                # First check if peer already has these chunks
-                                response = requests.post(
-                                    f"{peer}/check_chunks",
-                                    json={'chunks': vulnerable_chunk_hashes},
-                                    timeout=2
-                                )
-                                
-                                if response.status_code == 200:
-                                    data = response.json()
-                                    # If peer is missing any of these chunks, they're a candidate
-                                    if len(data['available_chunks']) < len(vulnerable_chunk_hashes):
-                                        candidates.append(peer)
-                            except requests.exceptions.RequestException:
-                                continue
-                        
-                        # Share vulnerable chunks with peers that need them
-                        needed = min(3, len(candidates))  # Share with up to 3 new peers
-                        for i in range(needed):
-                            peer = candidates[i]
-                            try:
-                                # First check which chunks this peer is missing
-                                response = requests.post(
-                                    f"{peer}/check_chunks",
-                                    json={'chunks': vulnerable_chunk_hashes},
-                                    timeout=2
-                                )
-                                
-                                if response.status_code != 200:
-                                    continue
-                                    
-                                data = response.json()
-                                missing_chunks = set(vulnerable_chunk_hashes) - set(data['available_chunks'])
-                                
-                                if not missing_chunks:
-                                    continue
-                                
-                                # Send file info first
-                                cursor.execute(
-                                    'SELECT * FROM files WHERE file_hash = ?',
-                                    (file_hash,)
-                                )
-                                file_info = dict(cursor.fetchone())
-                                file_info['chunks'] = list(missing_chunks)
-                                
-                                response = requests.post(
-                                    f"{peer}/register_file",
-                                    json={
-                                        'file_hash': file_hash,
-                                        'file_info': file_info
-                                    },
-                                    timeout=5
-                                )
-                                response.raise_for_status()
-                                
-                                for chunk_hash in missing_chunks:
-                                    chunk_path = os.path.join(current_app.config['UPLOAD_FOLDER'], f"{chunk_hash}.chunk")
-                                    if os.path.exists(chunk_path):
-                                        try:
-                                            with open(chunk_path, 'rb') as f:
-                                                files = {'chunk': (f"{chunk_hash}.chunk", f)}
-                                                response = requests.post(
-                                                    f"{peer}/upload_chunk",
-                                                    files=files,
-                                                    timeout=10
-                                                )
-                                                response.raise_for_status()
-                                                success = True
-                                        except requests.exceptions.RequestException:
-                                            # HTTP failed, try hole punching
-                                            if coordinate_hole_punching(peer, file_hash, chunk_hash):
-                                                success = True
-                                
-                                if success:
-                                    # Register that this peer is now hosting the file
+                            # Use public peer to find additional hosts
+                            for public_peer in public_peers:
+                                try:
                                     response = requests.post(
-                                        f"{peer}/register_hosting",
-                                        json={
-                                            'file_hash': file_hash,
-                                            'node_id': current_app.config['NODE_ID_HEX']
-                                        },
-                                        timeout=2
+                                        f"{public_peer}/find_chunk",
+                                        json={'chunk_hash': chunk_hash},
+                                        timeout=3
                                     )
-                                    print(f"Successfully shared vulnerable chunks of {file_name} with {peer}")
                                     
-                            except requests.exceptions.RequestException as e:
-                                print(f"Failed to share with {peer}: {str(e)}")
-                    
-                    # If health is very high (>8.0) and we're not the owner, consider stopping hosting
-                    elif health > 8.0 and owner != current_app.config['NODE_ID_HEX']:
-                        print(f"File {file_name} has excellent health ({health:.1f}), considering stopping hosting")
-                        # Maybe remove some chunks we're hosting for this file
+                                    if response.status_code == 200:
+                                        hosts = response.json().get('hosts', [])
+                                        if hosts:
+                                            # We found potential sources through relay
+                                            print(f"Found {len(hosts)} potential sources for chunk {chunk_hash} via {public_peer}")
+                                            break
+                                except requests.exceptions.RequestException:
+                                    continue
                 
                 except Exception as e:
-                    print(f"Error during maintenance for {file_name}: {str(e)}")
-
-            # Check for new files from peers (only friends and regular peers)
-            for peer_type in ['friends', 'peers']:
-                for peer in current_app.config['PEER_TYPES'][peer_type]:
-                    try:
-                        files_url = f"{peer}/shared_files"
-                        print(f"Checking for new files at {files_url}")
-                        response = requests.get(files_url, timeout=2)
-                        if response.status_code == 200:
-                            peer_files = response.json()
-                            for file_hash, file_info in peer_files.items():
-                                # Check if we already know about this file
+                    print(f"Maintenance error for {file_name}: {str(e)}")
+            
+            # Automatic peer discovery through public nodes
+            for public_peer in public_peers:
+                try:
+                    # Get list of files from public peer
+                    response = requests.get(f"{public_peer}/shared_files", timeout=5)
+                    if response.status_code == 200:
+                        peer_files = response.json()
+                        for file_hash, file_info in peer_files.items():
+                            # Check if we already have this file
+                            cursor.execute(
+                                'SELECT 1 FROM files WHERE file_hash = ?',
+                                (file_hash,)
+                            )
+                            if not cursor.fetchone():
+                                # Register new file discovered through public peer
                                 cursor.execute(
-                                    'SELECT 1 FROM files WHERE file_hash = ?',
-                                    (file_hash,)
+                                    'INSERT INTO files (file_hash, original_name, display_name, game, description, password_hash, origin_node, size, owner) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                                    (file_hash, file_info.get('original_name'), file_info.get('display_name'), 
+                                     file_info.get('game'), file_info.get('description'), file_info.get('password_hash'),
+                                     file_info.get('origin_node'), file_info.get('size'), file_info.get('owner'))
                                 )
-                                if not cursor.fetchone():
-                                    # New file discovered
-                                    cursor.execute(
-                                        'INSERT INTO files (file_hash, original_name, display_name, game, description, password_hash, origin_node, size, owner) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-                                        (file_hash, file_info['original_name'], file_info['display_name'], file_info['game'], file_info['description'], file_info['password_hash'], file_info['origin_node'], file_info['size'], file_info['owner'])
-                                    )
-                                    db.commit()
-                                    print(f"Discovered new file from {peer}: {file_info['original_name']}")
-                    except requests.exceptions.RequestException as e:
-                        print(f"Failed to check for files from {peer}: {str(e)}")
-                        continue
+                                db.commit()
+                                print(f"Discovered new file via {public_peer}: {file_info.get('display_name')}")
+                except requests.exceptions.RequestException:
+                    continue
 
 def calculate_file_health(file_hash):
     """Calculate file health score (1.0 = all chunks have 1 host, 10.0 = all have 10 hosts)"""
@@ -1233,6 +1270,11 @@ def download_file(file_hash):
                 raise ValueError("No chunks found for this file")
             
             for chunk_hash in chunk_hashes:
+                try:
+                    chunk_data = download_chunk_with_relay(chunk_hash, file_hash)
+                    yield chunk_data
+                except FileNotFoundError:
+                    raise FileNotFoundError(f"Missing chunk {chunk_hash}")
                 chunk_path = os.path.join(current_app.config['UPLOAD_FOLDER'], f"{chunk_hash}.chunk")
                 
                 # Try local chunk first
@@ -1565,8 +1607,8 @@ if __name__ == '__main__':
     start_maintenance_thread()
     
     # Start UDP listener for hole punching
-    #udp_thread = threading.Thread(target=udp_listener)
-    #udp_thread.daemon = True
-    #udp_thread.start()
+    # udp_thread = threading.Thread(target=udp_listener)
+    # udp_thread.daemon = True
+    # udp_thread.start()
     
     app.run(debug=True, host='0.0.0.0', port=5000)
