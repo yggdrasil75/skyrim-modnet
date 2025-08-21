@@ -1310,6 +1310,7 @@ def maintenance_check():
                                         json={'chunks': [chunk_to_share]},
                                         timeout=2
                                     )
+                                    print(response)
                                     if response.status_code == 200:
                                         data = response.json()
                                         if chunk_to_share not in data.get('available_chunks', []):
