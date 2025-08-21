@@ -184,13 +184,17 @@ def download_chunk_with_fallback(chunk_hash, file_hash=None):
                     return chunk_data
             except requests.exceptions.RequestException:
                 print("download chunk with fallback failed at fail point 1")
-                # HTTP failed, try hole punching
+                # HTTP failed, try hole punching - THIS IS THE CRITICAL MISSING PART
                 try:
+                    print(f"HTTP failed for {peer}, attempting hole punching...")
                     if coordinate_hole_punching(peer, file_hash, chunk_hash):
                         # If hole punching succeeded, check if chunk is now available locally
+                        time.sleep(5)  # Give time for transfer to complete
                         if os.path.exists(chunk_path):
                             with open(chunk_path, 'rb') as f:
                                 return f.read()
+                        else:
+                            print(f"Hole punching succeeded but chunk {chunk_hash} not received")
                 except Exception as e:
                     print("download chunk with fallback failed at fail point 2")
                     print(f"Hole punching failed for {peer}: {e}")
@@ -1128,6 +1132,7 @@ def maintenance_check():
                         candidates = []
                         for peer in all_peers:
                             try:
+                                print(f"finding chunk: {peer}/find_chunk getting {vulnerable_chunks}")
                                 response = requests.post(
                                     f"{peer}/find_chunk",
                                     json={'chunk_hash': vulnerable_chunk_hashes},
