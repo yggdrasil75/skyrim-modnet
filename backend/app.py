@@ -72,6 +72,33 @@ app.config['STUN_SERVERS'] = [
     'stun.ideasip.com:3478'
 ]
 
+
+# Add endpoint to check peer status
+@app.route('/check_peer', methods=['POST'])
+def check_peer():
+    """Check if we have a specific peer and what type"""
+    data = request.get_json()
+    if not data or 'peer_address' not in data:
+        return jsonify({'status': 'error'}), 400
+    
+    peer_address = data['peer_address']
+    
+    db = get_db()
+    cursor = db.cursor()
+    cursor.execute(
+        'SELECT peer_type FROM peers WHERE peer_address = ?',
+        (peer_address,)
+    )
+    result = cursor.fetchone()
+    
+    if result:
+        return jsonify({
+            'is_peer': True,
+            'peer_type': result['peer_type']
+        })
+    else:
+        return jsonify({'is_peer': False})
+
 def download_chunk_with_relay(chunk_hash, file_hash=None):
     """Download a chunk using public node as relay if direct connection fails"""
     chunk_path = os.path.join(current_app.config['UPLOAD_FOLDER'], f"{chunk_hash}.chunk")
@@ -700,7 +727,7 @@ def load_peers_from_db():
                 except sqlite3.Error as e:
                     print(f"Error adding default peer to database: {e}")
 
-# New function to categorize a peer
+# Update the categorize_peer function to handle mutual relationships properly
 def categorize_peer(peer_address, peer_type):
     """Categorize a peer into one of the types"""
     valid_types = ['friend', 'peer', 'stranger', 'enemy']
@@ -727,7 +754,6 @@ def categorize_peer(peer_address, peer_type):
         )
         db.commit()
 
-# Add these routes after existing routes
 
 @app.route('/initiate_punch', methods=['POST'])
 def initiate_punch():
@@ -905,6 +931,56 @@ def udp_listener():
                 print(f"UDP listener error: {e}")
                 time.sleep(1)
 
+
+# Add a new endpoint for remote peer addition (to avoid circular notifications)
+@app.route('/add_peer_remote', methods=['POST'])
+def add_peer_remote():
+    """Endpoint for other nodes to add us as a peer (prevents infinite loops)"""
+    data = request.get_json()
+    if not data or 'peer_address' not in data:
+        return jsonify({'status': 'error', 'message': 'Missing peer_address'}), 400
+    
+    peer_address = data['peer_address']
+    peer_type = data.get('peer_type', 'peer')  # Default to peer
+    
+    # Don't allow remote addition of friends - only peers
+    if peer_type != 'peer':
+        return jsonify({'status': 'error', 'message': 'Can only add peers remotely'}), 400
+    
+    # Don't add ourselves
+    our_address = request.host_url.rstrip('/')
+    if not our_address.startswith('http'):
+        our_address = f"http://{our_address}"
+    
+    if peer_address == our_address:
+        return jsonify({'status': 'error', 'message': 'Cannot add self'}), 400
+    
+    # Don't allow modification of default peers
+    if peer_address in current_app.config['DEFAULT_PEERS']:
+        return jsonify({'status': 'error', 'message': 'Cannot modify default peers'}), 400
+    
+    try:
+        # Check if we already have this peer
+        db = get_db()
+        cursor = db.cursor()
+        cursor.execute(
+            'SELECT peer_type FROM peers WHERE peer_address = ?',
+            (peer_address,)
+        )
+        existing = cursor.fetchone()
+        
+        # Only add if not already present or if it's currently an enemy
+        if not existing or existing['peer_type'] == 'enemy':
+            categorize_peer(peer_address, 'peer')
+            return jsonify({'status': 'success', 'message': 'Peer added'})
+        else:
+            return jsonify({'status': 'success', 'message': 'Peer already exists'})
+            
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+# Update the add_peer function to make peer relationships mutual
 @app.route('/add_peer', methods=['POST'])
 def add_peer():
     peer_address = request.form.get('peer_address')
@@ -927,20 +1003,23 @@ def add_peer():
     try:
         categorize_peer(peer_address, peer_type)
         
-        # Notify the new peer about our existence (only if friend or peer)
-        if peer_type in ['friend', 'peer']:
+        # For peer relationships (not friends), make it mutual by notifying the other node
+        if peer_type == 'peer':
             try:
                 our_address = request.host_url.rstrip('/')
                 if not our_address.startswith('http'):
                     our_address = f"http://{our_address}"
-                requests.post(f"{peer_address}/add_peer", 
+                
+                # Notify the peer to add us as a peer (not friend)
+                requests.post(f"{peer_address}/add_peer_remote", 
                              json={
                                  'peer_address': our_address,
-                                 'peer_type': 'peer'  # Default to peer when notifying
+                                 'peer_type': 'peer'
                              },
-                             timeout=2)
+                             timeout=5)
             except requests.exceptions.RequestException as e:
                 print(f"Failed to notify peer {peer_address}: {e}")
+                # Still continue even if notification fails
             
         return redirect(url_for('index'))
     except ValueError as e:
@@ -961,6 +1040,7 @@ def set_peer_type():
     except ValueError as e:
         return str(e), 400
 
+# Update the maintenance_check function to handle mutual peer relationships
 def maintenance_check():
     """Periodically check file health and use relay if needed"""
     os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
@@ -974,6 +1054,39 @@ def maintenance_check():
                 list(current_app.config['PEER_TYPES']['peers']) +
                 list(current_app.config['PEER_TYPES']['strangers'])
             )
+            
+            # Verify mutual peer relationships
+            for peer_address in list(current_app.config['PEER_TYPES']['peers']):
+                try:
+                    # Skip default peers
+                    if peer_address in current_app.config['DEFAULT_PEERS']:
+                        continue
+                    
+                    # Check if peer is responsive
+                    response = requests.get(f"{peer_address}/", timeout=3)
+                    if response.status_code != 200:
+                        print(f"Peer {peer_address} is unresponsive, demoting to stranger")
+                        categorize_peer(peer_address, 'stranger')
+                        continue
+                        
+                    # Verify they have us as a peer too (optional health check)
+                    our_address = f"http://{socket.gethostbyname(socket.gethostname())}:5000"
+                    response = requests.post(
+                        f"{peer_address}/check_peer",
+                        json={'peer_address': our_address},
+                        timeout=3
+                    )
+                    
+                    if response.status_code == 200 and response.json().get('is_peer'):
+                        # Healthy mutual relationship
+                        pass
+                    else:
+                        print(f"Peer {peer_address} doesn't have us as peer, demoting to stranger")
+                        categorize_peer(peer_address, 'stranger')
+                        
+                except requests.exceptions.RequestException:
+                    print(f"Peer {peer_address} is unresponsive, demoting to stranger")
+                    categorize_peer(peer_address, 'stranger')
             
             # Check each file's health
             db = get_db()
@@ -1699,6 +1812,9 @@ def upload_chunk():
     except Exception as e:
         print("upload chunk failed at breakpoint 1")
         return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+
 
 @app.route('/shared_files')
 def list_shared_files():
