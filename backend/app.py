@@ -1118,7 +1118,7 @@ def maintenance_check():
                             LEFT JOIN hosts h ON c.file_hash = h.file_hash
                             WHERE c.file_hash = ?
                             GROUP BY c.chunk_hash
-                            HAVING host_count < 3
+                            --HAVING host_count < 3
                             ORDER BY host_count ASC
                             LIMIT 5
                         ''', (file_hash,))
