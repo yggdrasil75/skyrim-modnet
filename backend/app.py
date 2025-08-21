@@ -1131,6 +1131,7 @@ def maintenance_check():
                             
                         candidates = []
                         for peer in all_peers:
+                            print(f"trying to find chunks at peer: {peer}")
                             try:
                                 print(f"finding chunk: {peer}/find_chunk getting {vulnerable_chunks}")
                                 response = requests.post(
@@ -1171,6 +1172,7 @@ def maintenance_check():
                             peer = candidates[i]
                             try:
                                 # First check which chunks this peer is missing
+                                print(f"checking chunks at peer {peer}")
                                 response = requests.post(
                                     f"{peer}/check_chunks",
                                     json={'chunks': vulnerable_chunk_hashes},
@@ -1194,6 +1196,7 @@ def maintenance_check():
                                 file_info = dict(cursor.fetchone())
                                 file_info['chunks'] = list(missing_chunks)
                                 
+                                print(f'registering file {file_info} at {peer}')
                                 response = requests.post(
                                     f"{peer}/register_file",
                                     json={
@@ -1209,6 +1212,7 @@ def maintenance_check():
                                     if os.path.exists(chunk_path):
                                         try:
                                             with open(chunk_path, 'rb') as f:
+                                                
                                                 files = {'chunk': (f"{chunk_hash}.chunk", f)}
                                                 response = requests.post(
                                                     f"{peer}/upload_chunk",
@@ -1216,6 +1220,7 @@ def maintenance_check():
                                                     timeout=10
                                                 )
                                                 response.raise_for_status()
+                                                print(f'successful chunk response for file {file_info} at {peer}')
                                                 success = True
                                         except requests.exceptions.RequestException:
                                             print("http failed, trying hole punch")
