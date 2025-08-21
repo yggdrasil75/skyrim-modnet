@@ -1522,52 +1522,53 @@ def upload_file():
         
         # Split file into chunks
         chunk_hashes = split_file(filepath, file_hash)
-        
-        # Store file metadata in database
-        with app.app_context():
-            db = get_db()
-            cursor = db.cursor()
-            cursor.execute(
-                'INSERT INTO files (file_hash, original_name, display_name, game, description, password_hash, origin_node, size, owner) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
-                (file_hash, 
-                 filename,
-                 request.form['display_name'],
-                 request.form['game'],
-                 request.form.get('description', ''),
-                 password_hash,
-                 current_app.config['NODE_ID_HEX'],
-                 os.path.getsize(filepath), 
-                 current_app.config['NODE_ID_HEX'])
-            )
-            db.commit()
-            
-            # Register that we're hosting this file
-            register_hosting(file_hash)
-            
-            # Broadcast file metadata to peers
-            broadcast_to_peers({
-                'file_hash': file_hash,
-                'file_info': {
-                    'original_name': filename,
-                    'display_name': request.form['display_name'],
-                    'game': request.form['game'],
-                    'description': request.form.get('description', ''),
-                    'password_hash': password_hash,
-                    'origin_node': current_app.config['NODE_ID_HEX'],
-                    'size': os.path.getsize(filepath),
-                    'chunks': chunk_hashes,
-                    'owner': current_app.config['NODE_ID_HEX']
-                }
-            }, 'register_file')
-            
-            # Clean up original file (we only keep chunks)
-            os.remove(filepath)
-            
-            # Show success message with password reminder
-            return render_template('upload_success.html', 
-                                file_name=request.form['display_name'],
-                                password=request.form['password'])
-    
+        try:
+            # Store file metadata in database
+            with app.app_context():
+                db = get_db()
+                cursor = db.cursor()
+                cursor.execute(
+                    'INSERT INTO files (file_hash, original_name, display_name, game, description, password_hash, origin_node, size, owner) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                    (file_hash, 
+                    filename,
+                    request.form['display_name'],
+                    request.form['game'],
+                    request.form.get('description', ''),
+                    password_hash,
+                    current_app.config['NODE_ID_HEX'],
+                    os.path.getsize(filepath), 
+                    current_app.config['NODE_ID_HEX'])
+                )
+                db.commit()
+                
+                # Register that we're hosting this file
+                register_hosting(file_hash)
+                
+                # Broadcast file metadata to peers
+                broadcast_to_peers({
+                    'file_hash': file_hash,
+                    'file_info': {
+                        'original_name': filename,
+                        'display_name': request.form['display_name'],
+                        'game': request.form['game'],
+                        'description': request.form.get('description', ''),
+                        'password_hash': password_hash,
+                        'origin_node': current_app.config['NODE_ID_HEX'],
+                        'size': os.path.getsize(filepath),
+                        'chunks': chunk_hashes,
+                        'owner': current_app.config['NODE_ID_HEX']
+                    }
+                }, 'register_file')
+                
+                # Clean up original file (we only keep chunks)
+                os.remove(filepath)
+                
+                # Show success message with password reminder
+                return render_template('upload_success.html', 
+                                    file_name=request.form['display_name'],
+                                    password=request.form['password'])
+        except sqlite3.IntegrityError as e:
+            print(f"failed to upload due to {e}")    
     return redirect(request.url)
 
 @app.route('/download/<file_hash>')
