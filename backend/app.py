@@ -1125,6 +1125,7 @@ def maintenance_check():
                         vulnerable_chunks = cursor.fetchall()
                         
                         if not vulnerable_chunks:
+                            print("no vulnerable chunks")
                             continue
                             
                         vulnerable_chunk_hashes = [row['chunk_hash'] for row in vulnerable_chunks]
