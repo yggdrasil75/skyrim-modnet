@@ -1517,27 +1517,45 @@ def upload_file():
         # Calculate file hash
         file_hash = hashlib.sha256(open(filepath, 'rb').read()).hexdigest()
         
-        # Hash the password with node ID as salt
-        password_hash = hash_with_node_id(request.form['password'])
-        
-        # Split file into chunks
-        chunk_hashes = split_file(filepath, file_hash)
-        try:
-            # Store file metadata in database
-            with app.app_context():
-                db = get_db()
-                cursor = db.cursor()
+        with app.app_context():
+            db = get_db()
+            cursor = db.cursor()
+
+            # Proactively check if the file hash already exists
+            cursor.execute(
+                'SELECT display_name FROM files WHERE file_hash = ?',
+                (file_hash,)
+            )
+            existing_file = cursor.fetchone()
+
+            if existing_file:
+                # If it exists, clean up the temp file and show the duplicate page
+                os.remove(filepath)
+                return render_template(
+                    'duplicate_file.html', 
+                    existing_name=existing_file['display_name']
+                )
+
+            # If we reach here, the file is not a duplicate. Proceed with the upload.
+            try:
+                # Hash the password with node ID as salt
+                password_hash = hash_with_node_id(request.form['password'])
+                
+                # Split file into chunks
+                chunk_hashes = split_file(filepath, file_hash)
+                
+                # Store file metadata in database
                 cursor.execute(
                     'INSERT INTO files (file_hash, original_name, display_name, game, description, password_hash, origin_node, size, owner) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
                     (file_hash, 
-                    filename,
-                    request.form['display_name'],
-                    request.form['game'],
-                    request.form.get('description', ''),
-                    password_hash,
-                    current_app.config['NODE_ID_HEX'],
-                    os.path.getsize(filepath), 
-                    current_app.config['NODE_ID_HEX'])
+                     filename,
+                     request.form['display_name'],
+                     request.form['game'],
+                     request.form.get('description', ''),
+                     password_hash,
+                     current_app.config['NODE_ID_HEX'],
+                     os.path.getsize(filepath), 
+                     current_app.config['NODE_ID_HEX'])
                 )
                 db.commit()
                 
@@ -1559,16 +1577,24 @@ def upload_file():
                         'owner': current_app.config['NODE_ID_HEX']
                     }
                 }, 'register_file')
-                
-                # Clean up original file (we only keep chunks)
+
+            except sqlite3.IntegrityError:
+                # This is a fallback, in case a race condition occurs.
+                # The proactive check above should catch 99.9% of cases.
+                db.rollback()
                 os.remove(filepath)
-                
-                # Show success message with password reminder
-                return render_template('upload_success.html', 
-                                    file_name=request.form['display_name'],
-                                    password=request.form['password'])
-        except sqlite3.IntegrityError as e:
-            print(f"failed to upload due to {e}")    
+                # We can't be sure what the existing name is here, so give a generic message.
+                return "A duplicate file was detected during a race condition. Please try again.", 409
+            
+
+        # Clean up original file (we only keep chunks)
+        os.remove(filepath)
+        
+        # Show success message with password reminder
+        return render_template('upload_success.html', 
+                            file_name=request.form['display_name'],
+                            password=request.form['password'])
+    
     return redirect(request.url)
 
 @app.route('/download/<file_hash>')
