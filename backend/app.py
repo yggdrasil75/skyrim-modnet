@@ -1310,13 +1310,14 @@ def maintenance_check():
                                         json={'chunks': [chunk_to_share]},
                                         timeout=2
                                     )
-                                    print(response)
+                                    print(response.json())
                                     if response.status_code == 200:
                                         data = response.json()
                                         if chunk_to_share not in data.get('available_chunks', []):
                                             candidate_peer = peer
                                             break # Found a suitable peer
-                                except requests.exceptions.RequestException:
+                                except requests.exceptions.RequestException as e:
+                                    print(f"request exception: {e}")
                                     continue
                             
                             if not candidate_peer:
