@@ -1163,6 +1163,36 @@ def maintenance_check():
         while True:
             time.sleep(current_app.config['MAINTENANCE_INTERVAL'])
             
+            db = get_db()
+            cursor = db.cursor()
+
+            try:
+                print("Maintenance: Verifying local chunk storage consistency...")
+                cursor.execute(
+                    'SELECT chunk_hash FROM chunk_hosts WHERE node_id = ?',
+                    (current_app.config['NODE_ID_HEX'],)
+                )
+                
+                local_chunks_in_db = [row['chunk_hash'] for row in cursor.fetchall()]
+                missing_chunks = []
+                
+                for chunk_hash in local_chunks_in_db:
+                    chunk_path = os.path.join(current_app.config['UPLOAD_FOLDER'], f"{chunk_hash}.chunk")
+                    if not os.path.exists(chunk_path):
+                        missing_chunks.append(chunk_hash)
+                
+                if missing_chunks:
+                    print(f"Found {len(missing_chunks)} chunks in DB but not on disk. Pruning records.")
+                    placeholders = ','.join(['?'] * len(missing_chunks))
+                    delete_query = f'DELETE FROM chunk_hosts WHERE node_id = ? AND chunk_hash IN ({placeholders})'
+                    params = [current_app.config['NODE_ID_HEX']] + missing_chunks
+                    cursor.execute(delete_query, params)
+                    db.commit()
+                    print("Pruning complete.")
+
+            except Exception as e:
+                print(f"Error during local chunk verification: {e}")
+
             # Get all peers in priority order: friends first, then peers, then strangers
             all_peers = (
                 list(current_app.config['PEER_TYPES']['friends']) +
@@ -1201,8 +1231,6 @@ def maintenance_check():
                     categorize_peer(peer_address, 'stranger')
             
             # Check each file's health
-            db = get_db()
-            cursor = db.cursor()
             cursor.execute('SELECT file_hash, original_name, display_name, owner FROM files')
             files = cursor.fetchall()
             
@@ -1218,7 +1246,7 @@ def maintenance_check():
                     if health < 3.0:
                         print(f"File '{file_name}' needs health improvement (current: {health:.1f})")
                     
-                        # Get vulnerable chunks (chunks with the fewest known hosts)
+                        # --- MODIFIED: Added RANDOM() to avoid getting stuck on the same 5 chunks ---
                         cursor.execute('''
                             SELECT c.chunk_hash, COUNT(DISTINCT ch.node_id) as host_count
                             FROM chunks c
@@ -1226,7 +1254,7 @@ def maintenance_check():
                             WHERE c.file_hash = ?
                             GROUP BY c.chunk_hash
                             HAVING host_count < 3
-                            ORDER BY host_count ASC
+                            ORDER BY host_count ASC, RANDOM()
                             LIMIT 5
                         ''', (file_hash,))
                         vulnerable_chunks = cursor.fetchall()
@@ -1275,17 +1303,14 @@ def maintenance_check():
                         else:
                             print(f"This node hosts '{file_name}'. Attempting to share vulnerable chunks.")
                             
-                            # This prevents sending all chunks to the same first-available peer.
                             peers_already_shared_with = set()
 
                             for chunk_to_share in vulnerable_chunk_hashes:
-                                # Check if we actually have this chunk locally
                                 chunk_path = os.path.join(current_app.config['UPLOAD_FOLDER'], f"{chunk_to_share}.chunk")
                                 if not os.path.exists(chunk_path):
                                     print(f"Found vulnerable chunk {chunk_to_share[:10]}, but it's not stored locally. Cannot share.")
-                                    continue # Move to the next vulnerable chunk
+                                    continue
 
-                                # Find a suitable peer for this specific chunk
                                 candidate_peer = None
                                 for peer in all_peers:
                                     if peer in peers_already_shared_with:
@@ -1316,11 +1341,9 @@ def maintenance_check():
                                     print(f"Could not find any new peer that needs the vulnerable chunk {chunk_to_share[:10]}.")
                                     continue 
 
-                                # We found a chunk to share and a peer to give it to. Let's send it.
                                 try:
                                     print(f"Sharing chunk {chunk_to_share[:10]} of '{file_name}' with peer {candidate_peer}")
                                     
-                                    # 1. Register file metadata on the remote peer
                                     cursor.execute('SELECT * FROM files WHERE file_hash = ?', (file_hash,))
                                     file_info = dict(cursor.fetchone())
                                     cursor.execute('SELECT chunk_hash FROM chunks WHERE file_hash = ?', (file_hash,))
@@ -1332,7 +1355,6 @@ def maintenance_check():
                                         timeout=5
                                     ).raise_for_status()
 
-                                    # 2. Upload the chunk data
                                     with open(chunk_path, 'rb') as f:
                                         files = {'chunk': (f"{chunk_to_share}.chunk", f)}
                                         requests.post(
@@ -1341,7 +1363,6 @@ def maintenance_check():
                                             timeout=10
                                         ).raise_for_status()
                                     
-                                    # 3. Tell the peer to register as a host
                                     requests.post(
                                         f"{candidate_peer}/register_hosting",
                                         json={'file_hash': file_hash, 'chunk_hashes': [chunk_to_share]},
@@ -1361,9 +1382,8 @@ def maintenance_check():
                 except Exception as e:
                     print(f"Maintenance error for file '{file_name}' (hash: {file_hash}): {str(e)}")
             
-            # Automatic peer discovery (this part is fine)
+            # Automatic peer discovery
             for peer_type in ['friends', 'peers']:
-                # Using a copy to avoid issues if the set changes during iteration
                 for peer in list(current_app.config['PEER_TYPES'][peer_type]): 
                     try:
                         response = requests.get(f"{peer}/shared_files", timeout=5)
@@ -1878,41 +1898,44 @@ def get_chunk(chunk_hash):
     except FileNotFoundError:
         return "Chunk not found", 404
 
-# Update the upload_chunk endpoint to support hole punching
+# --- MODIFIED: More robust chunk upload handling ---
 @app.route('/upload_chunk', methods=['POST'])
 def upload_chunk():
     if 'chunk' not in request.files:
-        # Check if this is a hole punching transfer
+        # This part handles hole punching requests, which is separate
         data = request.get_json()
         if data and data.get('type') == 'chunk_transfer_request':
             chunk_hash = data.get('chunk_hash')
             if chunk_hash:
                 chunk_path = os.path.join(current_app.config['UPLOAD_FOLDER'], f"{chunk_hash}.chunk")
                 if os.path.exists(chunk_path):
-                    # Prepare for direct transfer
-                    return jsonify({
-                        'status': 'ready',
-                        'chunk_size': os.path.getsize(chunk_path)
-                    })
+                    return jsonify({'status': 'ready', 'chunk_size': os.path.getsize(chunk_path)})
                 return jsonify({'status': 'not_found'}), 404
         return jsonify({'status': 'error', 'message': 'No chunk provided'}), 400
     
-    # Regular HTTP upload
+    # Regular HTTP upload from maintenance PUSH strategy
     chunk_file = request.files['chunk']
-    chunk_hash = os.path.splitext(chunk_file.filename)[0]
+    # The filename sent is like "hash.chunk", so we get the "hash" part
+    chunk_hash = os.path.splitext(secure_filename(chunk_file.filename))[0]
+    
+    if not chunk_hash:
+        return jsonify({'status': 'error', 'message': 'Invalid chunk filename format'}), 400
+
     chunk_path = os.path.join(current_app.config['UPLOAD_FOLDER'], f"{chunk_hash}.chunk")
     
     try:
-        # Save the chunk
+        print(f"Receiving chunk {chunk_hash} to be saved at {chunk_path}")
         chunk_file.save(chunk_path)
         
         # Verify the chunk was saved correctly
         if not os.path.exists(chunk_path):
-            return jsonify({'status': 'error', 'message': 'Failed to save chunk'}), 500
+            print(f"ERROR: Failed to save chunk {chunk_hash} at {chunk_path}")
+            return jsonify({'status': 'error', 'message': 'Failed to save chunk on server'}), 500
             
+        print(f"Successfully saved chunk {chunk_hash}")
         return jsonify({'status': 'success', 'chunk_hash': chunk_hash})
     except Exception as e:
-        print("upload chunk failed at breakpoint 1")
+        print(f"Exception during chunk upload for {chunk_hash}: {e}")
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 @app.route('/shared_files')
