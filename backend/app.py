@@ -1454,23 +1454,13 @@ def check_chunks():
         return jsonify({'status': 'error', 'message': 'Missing chunks list'}), 400
     
     with app.app_context():
-        db = get_db()
-        cursor = db.cursor()
-        
-        # Check which chunks we have locally
         available_chunks = []
+        
         for chunk_hash in data['chunks']:
             chunk_path = os.path.join(current_app.config['UPLOAD_FOLDER'], f"{chunk_hash}.chunk")
             if os.path.exists(chunk_path):
                 available_chunks.append(chunk_hash)
-            else:
-                # Also check database in case it's registered but file is missing
-                cursor.execute(
-                    'SELECT 1 FROM chunks WHERE chunk_hash = ?',
-                    (chunk_hash,))
-                if cursor.fetchone():
-                    available_chunks.append(chunk_hash)
-        
+                
         return jsonify({
             'status': 'success',
             'available_chunks': available_chunks
