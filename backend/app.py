@@ -1100,6 +1100,7 @@ def maintenance_check():
                                                 response.raise_for_status()
                                                 success = True
                                         except requests.exceptions.RequestException:
+                                            print("http failed, trying hole punch")
                                             # HTTP failed, try hole punching
                                             if coordinate_hole_punching(peer, file_hash, chunk_hash):
                                                 success = True
@@ -1372,6 +1373,7 @@ def download_file(file_hash):
                             }
                             break
                     except requests.exceptions.RequestException:
+                        print("download file failed at breakpoint 1")
                         continue
                 else:
                     continue
@@ -1420,6 +1422,7 @@ def download_file(file_hash):
                                 chunk_found = True
                                 break
                         except requests.exceptions.RequestException:
+                            print("download file failed at breakpoint generate.1")
                             continue
                     if chunk_found:
                         break
@@ -1694,6 +1697,7 @@ def upload_chunk():
             
         return jsonify({'status': 'success', 'chunk_hash': chunk_hash})
     except Exception as e:
+        print("upload chunk failed at breakpoint 1")
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 @app.route('/shared_files')
