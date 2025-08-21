@@ -92,6 +92,7 @@ def download_chunk_with_relay(chunk_hash, file_hash=None):
                         f.write(chunk_data)
                     return chunk_data
             except requests.exceptions.RequestException:
+                print("download chunk with relay failed at fail point 1")
                 continue
     
     # If direct download fails, use public node as relay to find the chunk
@@ -123,8 +124,11 @@ def download_chunk_with_relay(chunk_hash, file_hash=None):
                                 f.write(chunk_data)
                             return chunk_data
                     except requests.exceptions.RequestException:
+                        print("download chunk with relay failed at fail point 2")
                         continue
+                    
         except requests.exceptions.RequestException:
+            print("download chunk with relay failed at fail point 3")
             continue
     
     raise FileNotFoundError(f"Missing chunk {chunk_hash}")
@@ -152,6 +156,7 @@ def download_chunk_with_fallback(chunk_hash, file_hash=None):
                         f.write(chunk_data)
                     return chunk_data
             except requests.exceptions.RequestException:
+                print("download chunk with fallback failed at fail point 1")
                 # HTTP failed, try hole punching
                 try:
                     if coordinate_hole_punching(peer, file_hash, chunk_hash):
@@ -160,6 +165,7 @@ def download_chunk_with_fallback(chunk_hash, file_hash=None):
                             with open(chunk_path, 'rb') as f:
                                 return f.read()
                 except Exception as e:
+                    print("download chunk with fallback failed at fail point 2")
                     print(f"Hole punching failed for {peer}: {e}")
                     continue
     
@@ -206,6 +212,7 @@ def find_chunk():
                 if response.status_code == 200 and response.json().get('has_chunk'):
                     hosts.append(peer)
             except requests.exceptions.RequestException:
+                print("find_chunk failed at fail point 1")
                 continue
     
     return jsonify({'chunk_hash': chunk_hash, 'hosts': hosts})
@@ -237,6 +244,8 @@ def relay_chunk(chunk_hash):
             return jsonify({'error': 'Chunk not found on source peer'}), 404
             
     except requests.exceptions.RequestException as e:
+        print("relay_chunk failed at fail point 1")
+
         return jsonify({'error': f'Relay failed: {str(e)}'}), 500
     
 # Add this function to get public IP and port mapping
@@ -333,6 +342,8 @@ def coordinate_hole_punching(target_peer, file_hash=None, chunk_hash=None):
         return False
         
     except requests.exceptions.RequestException:
+        print("coordinate_hole_punching failed at fail point 1")
+
         return False
 
 def attempt_direct_connection(target_endpoint, file_hash=None, chunk_hash=None):
@@ -595,6 +606,7 @@ def reassemble_file(file_hash, output_path):
                             chunk_found = True
                             break
                     except requests.exceptions.RequestException:
+                        print("reassemble_file failed at fail point 1")
                         continue
                 
                 if not chunk_found:
@@ -609,6 +621,7 @@ def broadcast_to_peers(data, endpoint):
             try:
                 requests.post(f"{peer}/{endpoint}", json=data, timeout=2)
             except requests.exceptions.RequestException:
+                print("broadcast_to_peers failed at fail point 1")
                 continue
 
 def register_hosting(file_hash, node_id=None):
@@ -1015,6 +1028,7 @@ def maintenance_check():
                                         print(f"Found {len(hosts)} potential sources for chunk {vulnerable_chunk_hashes} via {peer}")
                                         break
                             except requests.exceptions.RequestException:
+                                print("find chunk failed via /find_chunk")
                                 continue
                             try:
                                 # First check if peer already has these chunks
@@ -1030,6 +1044,7 @@ def maintenance_check():
                                     if len(data['available_chunks']) < len(vulnerable_chunk_hashes):
                                         candidates.append(peer)
                             except requests.exceptions.RequestException:
+                                print("find chunk failed for check_chunks")
                                 continue
                             
                         # Share vulnerable chunks with peers that need them
