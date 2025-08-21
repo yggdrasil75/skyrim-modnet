@@ -1115,12 +1115,13 @@ def maintenance_check():
                         cursor.execute('''
                             SELECT c.chunk_hash, COUNT(DISTINCT h.node_id) as host_count
                             FROM chunks c
-                            LEFT JOIN hosts h ON c.file_hash = h.file_hash
+                            LEFT JOIN hosts h ON c.chunk_hash = h.chunk_hash
                             WHERE c.file_hash = ?
                             GROUP BY c.chunk_hash
-                            --HAVING host_count < 3
+                            HAVING host_count < 3
                             ORDER BY host_count ASC
                             LIMIT 5
+
                         ''', (file_hash,))
                         vulnerable_chunks = cursor.fetchall()
                         
