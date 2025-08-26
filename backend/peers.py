@@ -246,4 +246,10 @@ def add_peer():
 
 @peerblueprint.route('/peers')
 def peerpage():
-    return render_template('peers.html')
+    # Get the peer types from the configuration
+    peer_types = get_peer_types()
+    
+    # Convert sets to lists for the template
+    peer_types_for_template = {key: list(value) for key, value in peer_types.items()}
+    
+    return render_template('peers.html', peer_types=peer_types_for_template)

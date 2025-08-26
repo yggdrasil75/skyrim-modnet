@@ -1649,9 +1649,5 @@ if __name__ == '__main__':
     # Start maintenance thread
     start_maintenance_thread()
     
-    # Start UDP listener for hole punching
-    # udp_thread = threading.Thread(target=udp_listener)
-    # udp_thread.daemon = True
-    # udp_thread.start()
     app.register_blueprint(peerblueprint)
     app.run(debug=True, host='0.0.0.0', port=5000)
