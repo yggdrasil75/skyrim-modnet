@@ -11,7 +11,7 @@ import socket
 import time
 import struct
 import json
-from peers import load_peers_from_db, peerblueprint
+from peers import load_peers_from_db, peerblueprint, broadcast_to_peers
 from database import get_db, init_db, close_db
 
 udpon = False
@@ -53,7 +53,7 @@ app.config['DATABASE'] = './database.db'
 
 # Add to configuration section (after existing config)
 app.config['NAT_TRAVERSAL_PORT'] = 42441  # Secondary port for hole punching
-app.config['HOLE_PUNCHING_TIMEOUT'] = 5  # Seconds to wait for hole punching
+app.config['HOLE_PUNCHING_TIMEOUT'] = 10  # Seconds to wait for hole punching
 app.config['STUN_SERVERS'] = [
     'stun.l.google.com:19302',
     'stun1.l.google.com:19302',
@@ -137,7 +137,7 @@ def download_chunk_with_relay(chunk_hash, file_hash=None):
     raise FileNotFoundError(f"Missing chunk {chunk_hash}")
 
 # Add this function to handle chunk downloads with hole punching fallback
-def download_chunk_with_fallback(chunk_hash, file_hash=None):
+def download_chunk(chunk_hash, file_hash=None):
     """Download a chunk with hole punching fallback"""
     chunk_path = os.path.join(current_app.config['UPLOAD_FOLDER'], f"{chunk_hash}.chunk")
     
@@ -274,7 +274,7 @@ def get_public_endpoint(stun_servers=None):
             ]) + os.urandom(12)  # Transaction ID
             
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            sock.settimeout(2)
+            sock.settimeout(app.config['HOLE_PUNCHING_TIMEOUT'])
             
             sock.sendto(stun_binding_request, (server, port))
             response, addr = sock.recvfrom(1024)
@@ -408,7 +408,7 @@ def transfer_chunk_via_p2p(target_endpoint, chunk_hash):
         
         # Create socket and send chunk
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.settimeout(5)
+        sock.settimeout(app.config['HOLE_PUNCHING_TIMEOUT'])
         
         # Send metadata first
         metadata = json.dumps({
@@ -719,7 +719,7 @@ def udp_listener():
         updon = True
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.bind(('0.0.0.0', current_app.config['NAT_TRAVERSAL_PORT']))
-        sock.settimeout(1)
+        sock.settimeout(app.config['HOLE_PUNCHING_TIMEOUT'])
         
         print(f"UDP listener started on port {current_app.config['NAT_TRAVERSAL_PORT']}")
         
@@ -964,7 +964,7 @@ def maintenance_check():
                                         print(f"Attempting to download chunk {chunk_to_acquire[:10]} from {peer}")
                                         
                                         # Use the download function with fallback
-                                        chunk_data = download_chunk_with_fallback(chunk_to_acquire, file_hash)
+                                        chunk_data = download_chunk(chunk_to_acquire, file_hash)
                                         
                                         # Save the chunk locally
                                         with open(chunk_path, 'wb') as f:
@@ -1165,7 +1165,7 @@ def generate_download_stream(file_hash):
         
         for chunk_hash in chunk_hashes:
             try:
-                chunk_data = download_chunk_with_fallback(chunk_hash, file_hash)
+                chunk_data = download_chunk(chunk_hash, file_hash)
                 yield chunk_data
             except FileNotFoundError:
                 raise FileNotFoundError(f"Missing chunk {chunk_hash} for file {file_hash}")
@@ -1331,7 +1331,7 @@ def download_file(file_hash):
                 raise ValueError("No chunks found for this file")
             
             for chunk_hash in chunk_hashes:
-                try:
+                try: 
                     chunk_data = download_chunk_with_relay(chunk_hash, file_hash)
                     yield chunk_data
                 except FileNotFoundError:
@@ -1595,7 +1595,7 @@ def get_chunk(chunk_hash):
         result = cursor.fetchone()
         file_hash = result['file_hash'] if result else None
         
-        chunk_data = download_chunk_with_fallback(chunk_hash, file_hash)
+        chunk_data = download_chunk(chunk_hash, file_hash)
         return Response(chunk_data, mimetype='application/octet-stream')
     except FileNotFoundError:
         return "Chunk not found", 404
