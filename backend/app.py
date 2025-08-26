@@ -946,132 +946,108 @@ def maintenance_check():
                         )
                         is_hosting_this_file = cursor.fetchone() is not None
 
-                        print(f"Attempting to PULL vulnerable chunks for '{file_name}' from remote peers")
-                        
-                        for chunk_to_acquire in vulnerable_chunk_hashes:
+                        if not is_hosting_this_file:
+                            print(f"This node does not host '{file_name}'. Attempting to download a chunk to help.")
+                            
+                            chunk_to_acquire = vulnerable_chunk_hashes[0]
                             chunk_path = os.path.join(current_app.config['UPLOAD_FOLDER'], f"{chunk_to_acquire}.chunk")
-                            
-                            # Skip if we already have this chunk
+
                             if os.path.exists(chunk_path):
-                                print(f"Already have chunk {chunk_to_acquire[:10]}, skipping download")
+                                print(f"Logic error: Not registered as host, but chunk {chunk_to_acquire[:10]} exists. Re-registering.")
+                                register_hosting(file_hash, chunk_hashes=[chunk_to_acquire])
                                 continue
-                            
-                            # Try to download from each peer type in priority order
-                            chunk_downloaded = False
-                            for peer_type in ['friends', 'peers', 'strangers']:
-                                for peer in current_app.config['PEER_TYPES'][peer_type]:
-                                    try:
-                                        print(f"Attempting to download chunk {chunk_to_acquire[:10]} from {peer}")
-                                        
-                                        # Use the download function with fallback
-                                        chunk_data = download_chunk(chunk_to_acquire, file_hash)
-                                        
-                                        # Save the chunk locally
-                                        with open(chunk_path, 'wb') as f:
-                                            f.write(chunk_data)
-                                        
-                                        # Register that we're now hosting this chunk
-                                        register_hosting(file_hash, chunk_hashes=[chunk_to_acquire])
-                                        
-                                        # Broadcast our new hosting status
-                                        broadcast_to_peers({
-                                            'file_hash': file_hash,
-                                            'node_id': current_app.config['NODE_ID_HEX'],
-                                            'chunk_hashes': [chunk_to_acquire]
-                                        }, 'register_hosting')
-                                        
-                                        print(f"Successfully downloaded and registered chunk {chunk_to_acquire[:10]} from {peer}")
-                                        chunk_downloaded = True
-                                        break
-                                        
-                                    except FileNotFoundError:
-                                        print(f"Chunk {chunk_to_acquire[:10]} not found on {peer}")
-                                        continue
-                                    except Exception as e:
-                                        print(f"Error downloading chunk {chunk_to_acquire[:10]} from {peer}: {e}")
-                                        continue
-                                
-                                if chunk_downloaded:
-                                    break
-                            
-                            if not chunk_downloaded:
-                                print(f"Failed to download chunk {chunk_to_acquire[:10]} from any peer")
-
-                        # SECOND: PUSH STRATEGY - Share chunks we already have with others
-                        print(f"Attempting to PUSH vulnerable chunks for '{file_name}' to other peers")
-                        
-                        peers_already_shared_with = set()
-
-                        for chunk_to_share in vulnerable_chunk_hashes:
-                            chunk_path = os.path.join(current_app.config['UPLOAD_FOLDER'], f"{chunk_to_share}.chunk")
-                            if not os.path.exists(chunk_path):
-                                print(f"Found vulnerable chunk {chunk_to_share[:10]}, but it's not stored locally. Cannot share.")
-                                continue
-
-                            candidate_peer = None
-                            for peer in all_peers:
-                                if peer in peers_already_shared_with:
-                                    continue
-
-                                try:
-                                    response = requests.post(
-                                        f"{peer}/check_chunks",
-                                        json={'chunks': [chunk_to_share]},
-                                        timeout=2
-                                    )
-                                    # ### FIX: Robustly handle response printing
-                                    try:
-                                        print(f"Peer {peer} response: {response.json()}")
-                                    except json.JSONDecodeError:
-                                        print(f"Peer {peer} sent non-JSON response.")
-
-                                    if response.status_code == 200:
-                                        data = response.json()
-                                        if chunk_to_share not in data.get('available_chunks', []):
-                                            candidate_peer = peer
-                                            break # Found a suitable peer for THIS chunk
-                                except requests.exceptions.RequestException as e:
-                                    print(f"Request exception checking chunk with {peer}: {e}")
-                                    continue
-                            
-                            if not candidate_peer:
-                                print(f"Could not find any new peer that needs the vulnerable chunk {chunk_to_share[:10]}.")
-                                continue 
 
                             try:
-                                print(f"Sharing chunk {chunk_to_share[:10]} of '{file_name}' with peer {candidate_peer}")
+                                print(f"Attempting to download chunk {chunk_to_acquire[:10]}...")
+                                download_chunk(chunk_to_acquire, file_hash)
+                                print(f"Successfully downloaded chunk {chunk_to_acquire[:10]}. Becoming a new host.")
+                                register_hosting(file_hash, chunk_hashes=[chunk_to_acquire])
+                                broadcast_to_peers({
+                                    'file_hash': file_hash,
+                                    'node_id': current_app.config['NODE_ID_HEX'],
+                                    'chunk_hashes': [chunk_to_acquire]
+                                }, 'register_hosting')
+
+                            except FileNotFoundError:
+                                print(f"Could not find any peer with chunk {chunk_to_acquire[:10]}. Cannot help at this time.")
+                            except Exception as e:
+                                print(f"An error occurred while trying to download chunk {chunk_to_acquire[:10]}: {e}")
+
+                        else:
+                            print(f"This node hosts '{file_name}'. Attempting to share vulnerable chunks.")
+                            
+                            peers_already_shared_with = set()
+
+                            for chunk_to_share in vulnerable_chunk_hashes:
+                                chunk_path = os.path.join(current_app.config['UPLOAD_FOLDER'], f"{chunk_to_share}.chunk")
+                                if not os.path.exists(chunk_path):
+                                    print(f"Found vulnerable chunk {chunk_to_share[:10]}, but it's not stored locally. Cannot share.")
+                                    continue
+
+                                candidate_peer = None
+                                for peer in all_peers:
+                                    if peer in peers_already_shared_with:
+                                        continue
+
+                                    try:
+                                        response = requests.post(
+                                            f"{peer}/check_chunks",
+                                            json={'chunks': [chunk_to_share]},
+                                            timeout=2
+                                        )
+                                        # ### FIX: Robustly handle response printing
+                                        try:
+                                            print(f"Peer {peer} response: {response.json()}")
+                                        except json.JSONDecodeError:
+                                            print(f"Peer {peer} sent non-JSON response.")
+
+                                        if response.status_code == 200:
+                                            data = response.json()
+                                            if chunk_to_share not in data.get('available_chunks', []):
+                                                candidate_peer = peer
+                                                break # Found a suitable peer for THIS chunk
+                                    except requests.exceptions.RequestException as e:
+                                        print(f"Request exception checking chunk with {peer}: {e}")
+                                        continue
                                 
-                                cursor.execute('SELECT * FROM files WHERE file_hash = ?', (file_hash,))
-                                file_info = dict(cursor.fetchone())
-                                cursor.execute('SELECT chunk_hash FROM chunks WHERE file_hash = ?', (file_hash,))
-                                file_info['chunks'] = [r['chunk_hash'] for r in cursor.fetchall()]
+                                if not candidate_peer:
+                                    print(f"Could not find any new peer that needs the vulnerable chunk {chunk_to_share[:10]}.")
+                                    continue 
 
-                                requests.post(
-                                    f"{candidate_peer}/register_file",
-                                    json={'file_hash': file_hash, 'file_info': file_info},
-                                    timeout=5
-                                ).raise_for_status()
+                                try:
+                                    print(f"Sharing chunk {chunk_to_share[:10]} of '{file_name}' with peer {candidate_peer}")
+                                    
+                                    cursor.execute('SELECT * FROM files WHERE file_hash = ?', (file_hash,))
+                                    file_info = dict(cursor.fetchone())
+                                    cursor.execute('SELECT chunk_hash FROM chunks WHERE file_hash = ?', (file_hash,))
+                                    file_info['chunks'] = [r['chunk_hash'] for r in cursor.fetchall()]
 
-                                with open(chunk_path, 'rb') as f:
-                                    files = {'chunk': (f"{chunk_to_share}.chunk", f)}
                                     requests.post(
-                                        f"{candidate_peer}/upload_chunk",
-                                        files=files,
-                                        timeout=10
+                                        f"{candidate_peer}/register_file",
+                                        json={'file_hash': file_hash, 'file_info': file_info},
+                                        timeout=5
                                     ).raise_for_status()
-                                
-                                requests.post(
-                                    f"{candidate_peer}/register_hosting",
-                                    json={'file_hash': file_hash, 'chunk_hashes': [chunk_to_share]},
-                                    timeout=2
-                                ).raise_for_status()
 
-                                print(f"Successfully shared chunk with {candidate_peer}")
-                                peers_already_shared_with.add(candidate_peer)
+                                    with open(chunk_path, 'rb') as f:
+                                        files = {'chunk': (f"{chunk_to_share}.chunk", f)}
+                                        requests.post(
+                                            f"{candidate_peer}/upload_chunk",
+                                            files=files,
+                                            timeout=10
+                                        ).raise_for_status()
+                                    
+                                    requests.post(
+                                        f"{candidate_peer}/register_hosting",
+                                        json={'file_hash': file_hash, 'chunk_hashes': [chunk_to_share]},
+                                        timeout=2
+                                    ).raise_for_status()
 
-                            except requests.exceptions.RequestException as e:
-                                print(f"Failed to share chunk with {candidate_peer}: {e}")
-                    
+                                    print(f"Successfully shared chunk with {candidate_peer}")
+                                    peers_already_shared_with.add(candidate_peer)
+
+                                except requests.exceptions.RequestException as e:
+                                    print(f"Failed to share chunk with {candidate_peer}: {e}")
+                            
                     elif health > 8.0 and owner != current_app.config['NODE_ID_HEX']:
                         print(f"File {file_name} has excellent health ({health:.1f}), considering stopping hosting")
                         pass
