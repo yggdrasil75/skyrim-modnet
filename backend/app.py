@@ -11,7 +11,7 @@ import socket
 import time
 import struct
 import json
-from peers import load_peers_from_db, peerblueprint, broadcast_to_peers
+from peers import categorize_peer, load_peers_from_db, peerblueprint, broadcast_to_peers
 from database import get_db, init_db, close_db
 
 udpon = False
