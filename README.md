@@ -32,10 +32,9 @@ Install Docker
 git clone https://github.com/yggdrasil75/skyrim-modnet
 docker compose up -d
 ```
-Current Version: 0.0.2.
+Current Version: 0.0.3.
 
-In this version, its a stupidly simple site. You can port forward port 5000 to receieve connections from a remote host, but you will default to seeing what is hosted on the test system (www.themoddingtree.com:5000)
-If someone knows nat traversal, then please help me figure it out.
+Version 0.0.3 contains updates for code cleanup, fixing some errors, splitting files, moving peers to its own page, and more attempts at nat holepunching. I still dont know how to properly do it though.
 
 
 
