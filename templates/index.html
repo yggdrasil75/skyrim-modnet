@@ -140,66 +140,6 @@
         <p>Allowed formats: ZIP, RAR, 7Z, MOD, JAR</p>
     </div>
 
-    <div class="peer-section">
-        <h2>Network Peers</h2>
-        <form method="post" action="/add_peer">
-            <input type="text" name="peer_address" placeholder="http://peer-address:port" required>
-            <button type="submit">Add Peer</button>
-        </form>
-        
-        {% if peer_types %}
-            {% for type, peers in peer_types.items() if peers %}
-            <div class="peer-category">
-                <div class="peer-header" onclick="togglePeerList('{{ type }}')">
-                    <h3>{{ type|capitalize }} ({{ peers|length }})</h3>
-                    <span class="toggle-icon" id="toggle-{{ type }}">+</span>
-                </div>
-                <div class="peer-list" id="list-{{ type }}">
-                    {% for peer in peers %}
-                    <div class="peer-item {{ type[:-1] }}">
-                        <span class="peer-id">{{ peer.split('//')[-1] }}</span>
-                        {% if type == 'friends' %}
-                        <form method="post" action="/set_peer_type" style="margin-left: auto;">
-                            <input type="hidden" name="peer_address" value="{{ peer }}">
-                            <input type="hidden" name="peer_type" value="peer">
-                            <button type="submit" style="background-color: #2196F3;">Demote to Peer</button>
-                        </form>
-                        {% elif type == 'peers' %}
-                        <form method="post" action="/set_peer_type" style="margin-left: auto;">
-                            <input type="hidden" name="peer_address" value="{{ peer }}">
-                            <input type="hidden" name="peer_type" value="friend">
-                            <button type="submit" style="background-color: #4CAF50;">Promote to Friend</button>
-                        </form>
-                        {% elif type == 'strangers' %}
-                        <form method="post" action="/set_peer_type" style="margin-left: auto;">
-                            <input type="hidden" name="peer_address" value="{{ peer }}">
-                            <input type="hidden" name="peer_type" value="peer">
-                            <button type="submit" style="background-color: #2196F3;">Promote to Peer</button>
-                        </form>
-                        {% endif %}
-                        {% if type != 'enemies' %}
-                        <form method="post" action="/set_peer_type" style="margin-left: 5px;">
-                            <input type="hidden" name="peer_address" value="{{ peer }}">
-                            <input type="hidden" name="peer_type" value="enemy">
-                            <button type="submit" style="background-color: #f44336;">Block</button>
-                        </form>
-                        {% else %}
-                        <form method="post" action="/set_peer_type" style="margin-left: auto;">
-                            <input type="hidden" name="peer_address" value="{{ peer }}">
-                            <input type="hidden" name="peer_type" value="stranger">
-                            <button type="submit" style="background-color: #9e9e9e;">Unblock</button>
-                        </form>
-                        {% endif %}
-                    </div>
-                    {% endfor %}
-                </div>
-            </div>
-            {% endfor %}
-        {% else %}
-            <p>No peers connected yet. Add a peer to join the network.</p>
-        {% endif %}
-    </div>
-    
     <div class="file-list">
         <h2>Available Mods <button onclick="location.reload()">Refresh</button></h2>
         {% if files %}

@@ -11,25 +11,19 @@ import socket
 import time
 import struct
 import json
+from peers import load_peers_from_db, peerblueprint
+from database import get_db, init_db, close_db
 
 udpon = False
 
 app = Flask(__name__, template_folder="../templates")
 
-app.config['PEER_TYPES'] = {
-    'friends': set(),      # Prioritized connections
-    'peers': set(),        # Standard semi-permanent connections
-    'strangers': set(),    # Limited connections
-    'enemies': set()       # Blocked connections
-}
 
 # Configuration
 app.config['UPLOAD_FOLDER'] = './uploads'
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024 * 1024
 app.config['CHUNK_SIZE'] = 64 * 1024 * 1024
 app.config['ALLOWED_EXTENSIONS'] = {'zip', 'rar', '7z', 'mod', 'jar'}
-app.config['PEERS'] = set()  # Set to store peer addresses
-app.config['DEFAULT_PEERS'] = {'http://www.themoddingtree.com:5000'}  # Default peers
 
 def get_persistent_node_id():
     """Generate a persistent, cryptographically secure node ID that's 32 bytes long"""
@@ -72,32 +66,14 @@ app.config['STUN_SERVERS'] = [
     'stun.ideasip.com:3478'
 ]
 
-
-# Add endpoint to check peer status
-@app.route('/check_peer', methods=['POST'])
-def check_peer():
-    """Check if we have a specific peer and what type"""
-    data = request.get_json()
-    if not data or 'peer_address' not in data:
-        return jsonify({'status': 'error'}), 400
-    
-    peer_address = data['peer_address']
-    
-    db = get_db()
-    cursor = db.cursor()
-    cursor.execute(
-        'SELECT peer_type FROM peers WHERE peer_address = ?',
-        (peer_address,)
-    )
-    result = cursor.fetchone()
-    
-    if result:
-        return jsonify({
-            'is_peer': True,
-            'peer_type': result['peer_type']
-        })
-    else:
-        return jsonify({'is_peer': False})
+app.config['PEER_TYPES'] = {
+    'friends': set(),      # Prioritized connections
+    'peers': set(),        # Standard semi-permanent connections
+    'strangers': set(),    # Limited connections
+    'enemies': set()       # Blocked connections
+}
+app.config['PEERS'] = set()  # Set to store peer addresses
+app.config['DEFAULT_PEERS'] = {'http://www.themoddingtree.com:5000'}  # Default peers
 
 def download_chunk_with_relay(chunk_hash, file_hash=None):
     """Download a chunk using public node as relay if direct connection fails"""
@@ -210,7 +186,7 @@ def has_chunk(chunk_hash):
         return jsonify({'has_chunk': True})
     
     # Check database for chunk hosting registration
-    db = get_db()
+    db = get_db(app.config['NODE_ID_HEX'])
     cursor = db.cursor()
     cursor.execute(
         'SELECT 1 FROM chunk_hosts WHERE chunk_hash = ? AND node_id = ?',
@@ -478,135 +454,6 @@ def transfer_chunk_via_p2p(target_endpoint, chunk_hash):
     except (ValueError, socket.error, json.JSONDecodeError, IOError):
         return False
 
-# Database setup with node ID as salt
-def get_db():
-    db = getattr(g, '_database', None)
-    if db is None:
-        db = g._database = sqlite3.connect(app.config['DATABASE'])
-        db.row_factory = sqlite3.Row
-        
-        # Apply node_id as salt for database operations
-        cursor = db.cursor()
-        cursor.execute(f"PRAGMA key = '{app.config['NODE_ID_HEX']}'")
-        cursor.execute("PRAGMA cipher_compatibility = 3")
-        cursor.execute("PRAGMA kdf_iter = 256000")  # High iteration count for security
-        cursor.execute("PRAGMA cipher_page_size = 4096")
-    
-    return db
-
-def init_db():
-    with app.app_context():
-        db = get_db()
-        cursor = db.cursor()
-        
-        # Create tables if they don't exist
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS files (
-            file_hash TEXT PRIMARY KEY,
-            original_name TEXT NOT NULL,
-            display_name TEXT NOT NULL,
-            game TEXT NOT NULL,
-            description TEXT,
-            password_hash TEXT NOT NULL,
-            origin_node TEXT NOT NULL,
-            size INTEGER NOT NULL,
-            owner TEXT NOT NULL,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-        ''')
-        
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS chunks (
-            chunk_hash TEXT PRIMARY KEY,
-            file_hash TEXT NOT NULL,
-            sequence INTEGER NOT NULL,
-            FOREIGN KEY (file_hash) REFERENCES files (file_hash)
-        )
-        ''')
-        
-        # Old hosts table (for backward compatibility)
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS hosts (
-            file_hash TEXT NOT NULL,
-            node_id TEXT NOT NULL,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-            PRIMARY KEY (file_hash, node_id),
-            FOREIGN KEY (file_hash) REFERENCES files (file_hash)
-        )
-        ''')
-        
-        # New chunk_hosts table for chunk-level hosting
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS chunk_hosts (
-            chunk_hash TEXT NOT NULL,
-            node_id TEXT NOT NULL,
-            file_hash TEXT NOT NULL,
-            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-            PRIMARY KEY (chunk_hash, node_id),
-            FOREIGN KEY (chunk_hash) REFERENCES chunks (chunk_hash),
-            FOREIGN KEY (file_hash) REFERENCES files (file_hash)
-        )
-        ''')
-        
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS peers (
-            peer_address TEXT PRIMARY KEY,
-            peer_type TEXT NOT NULL CHECK(peer_type IN ('friend', 'peer', 'stranger', 'enemy')),
-            last_seen DATETIME DEFAULT CURRENT_TIMESTAMP
-        )
-        ''')
-        
-        # Migrate old data if needed
-        try:
-            # Check if chunk_hosts table is empty but hosts table has data
-            cursor.execute('SELECT COUNT(*) as count FROM chunk_hosts')
-            chunk_hosts_count = cursor.fetchone()['count']
-            
-            if chunk_hosts_count == 0:
-                cursor.execute('SELECT COUNT(*) as count FROM hosts')
-                hosts_count = cursor.fetchone()['count']
-                
-                if hosts_count > 0:
-                    print("Migrating old hosting data to new chunk-level format...")
-                    # For each file in hosts, assume the node hosts all chunks of that file
-                    cursor.execute('SELECT file_hash, node_id FROM hosts')
-                    for row in cursor.fetchall():
-                        file_hash = row['file_hash']
-                        node_id = row['node_id']
-                        
-                        # Get all chunks for this file
-                        cursor.execute(
-                            'SELECT chunk_hash FROM chunks WHERE file_hash = ?',
-                            (file_hash,)
-                        )
-                        chunks = cursor.fetchall()
-                        
-                        for chunk_row in chunks:
-                            chunk_hash = chunk_row['chunk_hash']
-                            # Insert into chunk_hosts
-                            cursor.execute(
-                                'INSERT OR IGNORE INTO chunk_hosts (chunk_hash, node_id, file_hash) VALUES (?, ?, ?)',
-                                (chunk_hash, node_id, file_hash)
-                            )
-                    
-                    db.commit()
-                    print("Migration completed successfully")
-                    
-        except sqlite3.Error as e:
-            print(f"Error during migration: {e}")
-            db.rollback()
-        
-        db.commit()
-
-def close_db(exception):
-    db = getattr(g, '_database', None)
-    if db is not None:
-        db.close()
-
-@app.teardown_appcontext
-def teardown_db(exception):
-    close_db(exception)
-
 # Helper functions with node ID as salt for cryptographic operations
 def allowed_file(filename):
     return '.' in filename and \
@@ -623,7 +470,7 @@ def split_file(filepath, file_hash):
     with app.app_context():
         chunks = []
         sequence = 0
-        db = get_db()
+        db = get_db(app.config['NODE_ID_HEX'])
         cursor = db.cursor()
         
         with open(filepath, 'rb') as f:
@@ -655,7 +502,7 @@ def split_file(filepath, file_hash):
 def reassemble_file(file_hash, output_path):
     """Reassemble file from chunks"""
     with app.app_context():
-        db = get_db()
+        db = get_db(app.config['NODE_ID_HEX'])
         cursor = db.cursor()
         
         # Get all chunks for this file in order
@@ -699,23 +546,13 @@ def reassemble_file(file_hash, output_path):
         
         return True
 
-def broadcast_to_peers(data, endpoint):
-    """Broadcast data to all known peers"""
-    with app.app_context():
-        for peer in current_app.config['PEERS']:
-            try:
-                requests.post(f"{peer}/{endpoint}", json=data, timeout=2)
-            except requests.exceptions.RequestException:
-                print("broadcast_to_peers failed at fail point 1")
-                continue
-
 def register_hosting(file_hash, node_id=None, chunk_hashes=None):
     """Register that this node is hosting a file or specific chunks"""
     with app.app_context():
         if node_id is None:
             node_id = current_app.config['NODE_ID_HEX']  # Use hex representation
         
-        db = get_db()
+        db = get_db(app.config['NODE_ID_HEX'])
         cursor = db.cursor()
         
         if chunk_hashes is None:
@@ -751,7 +588,7 @@ def register_hosting(file_hash, node_id=None, chunk_hashes=None):
 def get_file_hosts(file_hash):
     """Get all nodes hosting a specific file, based on chunk availability"""
     with app.app_context():
-        db = get_db()
+        db = get_db(app.config['NODE_ID_HEX'])
         cursor = db.cursor()
         
         # Get all chunks for this file
@@ -784,7 +621,7 @@ def get_file_hosts(file_hash):
 def get_shared_files():
     """Get all files shared in the network with health scores"""
     with app.app_context():
-        db = get_db()
+        db = get_db(app.config['NODE_ID_HEX'])
         cursor = db.cursor()
         cursor.execute('''
             SELECT *
@@ -800,64 +637,6 @@ def get_shared_files():
             result.append(file_dict)
         
         return result
-
-# Update the peer loading function
-def load_peers_from_db():
-    """Load known peers from database at startup and categorize them"""
-    with app.app_context():
-        db = get_db()
-        cursor = db.cursor()
-        cursor.execute('SELECT peer_address, peer_type FROM peers')
-        
-        # Clear all peer sets
-        for peer_type in current_app.config['PEER_TYPES']:
-            current_app.config['PEER_TYPES'][peer_type].clear()
-        
-        # Add peers from database to their respective sets
-        for row in cursor.fetchall():
-            peer_type = row['peer_type'] + 's'  # Convert to plural form
-            if peer_type in current_app.config['PEER_TYPES']:
-                current_app.config['PEER_TYPES'][peer_type].add(row['peer_address'])
-        
-        # Add default peers as regular peers if they're not already present
-        for peer in current_app.config['DEFAULT_PEERS']:
-            if not any(peer in peers for peers in current_app.config['PEER_TYPES'].values()):
-                current_app.config['PEER_TYPES']['peers'].add(peer)
-                try:
-                    cursor.execute(
-                        'INSERT OR IGNORE INTO peers (peer_address, peer_type) VALUES (?, ?)',
-                        (peer, 'peer')
-                    )
-                    db.commit()
-                except sqlite3.Error as e:
-                    print(f"Error adding default peer to database: {e}")
-
-# Update the categorize_peer function to handle mutual relationships properly
-def categorize_peer(peer_address, peer_type):
-    """Categorize a peer into one of the types"""
-    valid_types = ['friend', 'peer', 'stranger', 'enemy']
-    if peer_type not in valid_types:
-        raise ValueError(f"Invalid peer type. Must be one of {valid_types}")
-    
-    with app.app_context():
-        # Remove from all categories first
-        for pt in current_app.config['PEER_TYPES']:
-            if peer_address in current_app.config['PEER_TYPES'][pt]:
-                current_app.config['PEER_TYPES'][pt].remove(peer_address)
-        
-        # Add to the specified category
-        plural_type = peer_type + 's'
-        if plural_type in current_app.config['PEER_TYPES']:
-            current_app.config['PEER_TYPES'][plural_type].add(peer_address)
-        
-        # Update database
-        db = get_db()
-        cursor = db.cursor()
-        cursor.execute(
-            'INSERT OR REPLACE INTO peers (peer_address, peer_type) VALUES (?, ?)',
-            (peer_address, peer_type)
-        )
-        db.commit()
 
 @app.route('/initiate_punch', methods=['POST'])
 def initiate_punch():
@@ -1039,7 +818,7 @@ def udp_listener():
 def get_chunk_hosts(chunk_hash):
     """Get all nodes hosting a specific chunk"""
     with app.app_context():
-        db = get_db()
+        db = get_db(app.config['NODE_ID_HEX'])
         cursor = db.cursor()
         cursor.execute(
             'SELECT node_id FROM chunk_hosts WHERE chunk_hash = ?',
@@ -1047,113 +826,9 @@ def get_chunk_hosts(chunk_hash):
         )
         return [row['node_id'] for row in cursor.fetchall()]
 
-# Add a new endpoint for remote peer addition (to avoid circular notifications)
-@app.route('/add_peer_remote', methods=['POST'])
-def add_peer_remote():
-    """Endpoint for other nodes to add us as a peer (prevents infinite loops)"""
-    data = request.get_json()
-    if not data or 'peer_address' not in data:
-        return jsonify({'status': 'error', 'message': 'Missing peer_address'}), 400
-    
-    peer_address = data['peer_address']
-    peer_type = data.get('peer_type', 'peer')  # Default to peer
-    
-    # Don't allow remote addition of friends - only peers
-    if peer_type != 'peer':
-        return jsonify({'status': 'error', 'message': 'Can only add peers remotely'}), 400
-    
-    # Don't add ourselves
-    our_address = request.host_url.rstrip('/')
-    if not our_address.startswith('http'):
-        our_address = f"http://{our_address}"
-    
-    if peer_address == our_address:
-        return jsonify({'status': 'error', 'message': 'Cannot add self'}), 400
-    
-    # Don't allow modification of default peers
-    if peer_address in current_app.config['DEFAULT_PEERS']:
-        return jsonify({'status': 'error', 'message': 'Cannot modify default peers'}), 400
-    
-    try:
-        # Check if we already have this peer
-        db = get_db()
-        cursor = db.cursor()
-        cursor.execute(
-            'SELECT peer_type FROM peers WHERE peer_address = ?',
-            (peer_address,)
-        )
-        existing = cursor.fetchone()
-        
-        # Only add if not already present or if it's currently an enemy
-        if not existing or existing['peer_type'] == 'enemy':
-            categorize_peer(peer_address, 'peer')
-            return jsonify({'status': 'success', 'message': 'Peer added'})
-        else:
-            return jsonify({'status': 'success', 'message': 'Peer already exists'})
-            
-    except Exception as e:
-        return jsonify({'status': 'error', 'message': str(e)}), 500
-
-
-# Update the add_peer function to make peer relationships mutual
-@app.route('/add_peer', methods=['POST'])
-def add_peer():
-    peer_address = request.form.get('peer_address')
-    peer_type = request.form.get('peer_type', 'peer')  # Default to 'peer'
-    
-    if not peer_address:
-        return "Invalid peer address", 400
-        
-    # Ensure the peer address has http:// prefix if not present
-    if not peer_address.startswith(('http://', 'https://')):
-        peer_address = f"http://{peer_address}"
-        
-    # Remove trailing slash if present
-    peer_address = peer_address.rstrip('/')
-    
-    # Don't allow modification of default peers
-    if peer_address in current_app.config['DEFAULT_PEERS']:
-        return "Cannot modify default peers", 400
-    
-    try:
-        categorize_peer(peer_address, peer_type)
-        
-        # For peer relationships (not friends), make it mutual by notifying the other node
-        if peer_type == 'peer':
-            try:
-                our_address = request.host_url.rstrip('/')
-                if not our_address.startswith('http'):
-                    our_address = f"http://{our_address}"
-                
-                # Notify the peer to add us as a peer (not friend)
-                requests.post(f"{peer_address}/add_peer_remote", 
-                             json={
-                                 'peer_address': our_address,
-                                 'peer_type': 'peer'
-                             },
-                             timeout=5)
-            except requests.exceptions.RequestException as e:
-                print(f"Failed to notify peer {peer_address}: {e}")
-                # Still continue even if notification fails
-            
-        return redirect(url_for('index'))
-    except ValueError as e:
-        return str(e), 400
-
-# API endpoint to change peer type
-@app.route('/set_peer_type', methods=['POST'])
-def set_peer_type():
-    peer_address = request.form.get('peer_address')
-    peer_type = request.form.get('peer_type')
-    
-    if not peer_address or not peer_type:
-        return "Missing parameters", 400
-    
-    try:
-        categorize_peer(peer_address, peer_type)
-        return redirect(url_for('index'))
-    except ValueError as e:
-        return str(e), 400
+@app.teardown_appcontext
+def teardown_db(exception):
+    close_db(exception)
 
 # Update the maintenance_check function to use chunk-level operations
 def maintenance_check():
@@ -1163,7 +838,7 @@ def maintenance_check():
         while True:
             time.sleep(current_app.config['MAINTENANCE_INTERVAL'])
             
-            db = get_db()
+            db = get_db(app.config['NODE_ID_HEX'])
             cursor = db.cursor()
 
             try:
@@ -1408,7 +1083,7 @@ def maintenance_check():
 def calculate_file_health(file_hash):
     """Calculate file health score based on chunk-level hosting"""
     with app.app_context():
-        db = get_db()
+        db = get_db(app.config['NODE_ID_HEX'])
         cursor = db.cursor()
         
         # Get all chunks for this file
@@ -1478,7 +1153,7 @@ def check_chunks():
 def generate_download_stream(file_hash):
     with app.app_context():
         # Get all chunks for this file in order
-        cursor = get_db().cursor()
+        cursor = get_db(app.config['NODE_ID_HEX']).cursor()
         cursor.execute(
             'SELECT chunk_hash FROM chunks WHERE file_hash = ? ORDER BY sequence',
             (file_hash,)
@@ -1518,7 +1193,7 @@ def upload_file():
         file_hash = hashlib.sha256(open(filepath, 'rb').read()).hexdigest()
         
         with app.app_context():
-            db = get_db()
+            db = get_db(app.config['NODE_ID_HEX'])
             cursor = db.cursor()
 
             # Proactively check if the file hash already exists
@@ -1600,7 +1275,7 @@ def upload_file():
 @app.route('/download/<file_hash>')
 def download_file(file_hash):
     with app.app_context():
-        db = get_db()
+        db = get_db(app.config['NODE_ID_HEX'])
         cursor = db.cursor()
         
         # Check if we have the file in our database
@@ -1712,7 +1387,7 @@ def register_file():
         # Handle JSON registration
         if 'file_hash' in data and 'file_info' in data:
             with app.app_context():
-                db = get_db()
+                db = get_db(app.config['NODE_ID_HEX'])
                 cursor = db.cursor()
                 
                 # Check if we already know about this file
@@ -1769,7 +1444,7 @@ def register_file():
             
             # Store file metadata in database
             with app.app_context():
-                db = get_db()
+                db = get_db(app.config['NODE_ID_HEX'])
                 cursor = db.cursor()
                 cursor.execute(
                     'INSERT INTO files (file_hash, name, size, owner) VALUES (?, ?, ?, ?)',
@@ -1803,7 +1478,7 @@ def update_file(file_hash):
         return "Password required for updates", 401
     
     with app.app_context():
-        db = get_db()
+        db = get_db(app.config['NODE_ID_HEX'])
         cursor = db.cursor()
         
         # Verify password
@@ -1875,7 +1550,7 @@ def update_file(file_hash):
 @app.route('/file_info/<file_hash>')
 def get_file_info(file_hash):
     with app.app_context():
-        db = get_db()
+        db = get_db(app.config['NODE_ID_HEX'])
         cursor = db.cursor()
         
         cursor.execute(
@@ -1911,7 +1586,7 @@ def get_chunk(chunk_hash):
     # If we don't have the chunk locally, try to get it from other peers with hole punching
     try:
         # Get file_hash from database if possible
-        db = get_db()
+        db = get_db(app.config['NODE_ID_HEX'])
         cursor = db.cursor()
         cursor.execute(
             'SELECT file_hash FROM chunks WHERE chunk_hash = ?',
@@ -1992,8 +1667,8 @@ if __name__ == '__main__':
     
     # Initialize database and load peers within application context
     with app.app_context():
-        init_db()
-        load_peers_from_db()
+        init_db(app.config['NODE_ID_HEX'])
+        load_peers_from_db(app.config['NODE_ID_HEX'])
     
     # Start maintenance thread
     start_maintenance_thread()
@@ -2002,5 +1677,5 @@ if __name__ == '__main__':
     # udp_thread = threading.Thread(target=udp_listener)
     # udp_thread.daemon = True
     # udp_thread.start()
-    
+    app.register_blueprint(peerblueprint)
     app.run(debug=True, host='0.0.0.0', port=5000)
