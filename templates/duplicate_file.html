@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Duplicate File Detected</title>
+    <style>
+        body { font-family: sans-serif; line-height: 1.6; margin: 2em; background-color: #f4f4f4; color: #333; }
+        .container { max-width: 800px; margin: auto; padding: 2em; background: white; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); text-align: center; }
+        h1 { color: #d9534f; }
+        h2 { background-color: #eee; padding: 0.5em; border-radius: 4px; font-family: monospace; }
+        a { display: inline-block; margin-top: 1.5em; padding: 10px 20px; background-color: #007bff; color: white; text-decoration: none; border-radius: 5px; }
+        a:hover { background-color: #0056b3; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Duplicate File Detected</h1>
+        <p>The file you tried to upload has the exact same content as an existing file already on this node.</p>
+        <p>The existing mod is named:</p>
+        
+        <h2>{{ existing_name }}</h2>
+        
+        <p>No new file was added. The existing entry has been preserved.</p>
+        
+        <a href="{{ url_for('index') }}">Return to Homepage</a>
+    </div>
+</body>
+</html>
