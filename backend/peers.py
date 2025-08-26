@@ -1,6 +1,6 @@
 import requests
 import sqlite3
-from flask import request, redirect, url_for, jsonify, current_app, Blueprint
+from flask import render_template, request, redirect, url_for, jsonify, current_app, Blueprint
 
 from database import get_db
 
@@ -243,3 +243,7 @@ def add_peer():
         return redirect(url_for('peers'))  # You might want to change this
     except ValueError as e:
         return str(e), 400
+
+@peerblueprint.route('/peers')
+def peerpage():
+    return render_template('peers.html')
