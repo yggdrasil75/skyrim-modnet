@@ -949,10 +949,10 @@ if __name__ == '__main__':
     with app.app_context():
         init_db(app.config['NODE_ID_HEX'])
         load_peers_from_db(app.config['NODE_ID_HEX'])
-    
+        app.register_blueprint(peerblueprint)
+        app.register_blueprint(fileblueprint)
+        
     # Start maintenance thread
     start_maintenance_thread()
     
-    app.register_blueprint(peerblueprint)
-    app.register_blueprint(fileblueprint)
     app.run(debug=True, host='0.0.0.0', port=5000)

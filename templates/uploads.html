@@ -111,41 +111,33 @@
 <body>
     <h1>Decentralized Mod Sharing</h1>
     
-    <div class="file-list">
-        <h2>Available Mods <button onclick="location.reload()">Refresh</button></h2>
-        {% if files %}
-        <table>
-            <tr>
-                <th>Mod Name</th>
-                <th>Game</th>
-                <th>Description</th>
-                <th>Size</th>
-                <th>Hosts</th>
-                <th>Action</th>
-            </tr>
-            {% for file_hash, file_info in files.items() %}
-            <tr>
-                <td>{{ file_info.display_name }}</td>
-                <td>{{ file_info.game }}</td>
-                <td>{{ file_info.description }}</td>
-                <td class="file-size">
-                    {% if file_info.size < 1024 %}
-                        {{ file_info.size }} bytes
-                    {% elif file_info.size < 1048576 %}
-                        {{ (file_info.size / 1024)|round(1) }} KB
-                    {% else %}
-                        {{ (file_info.size / 1024 / 1024)|round(1) }} MB
-                    {% endif %}
-                </td>
-                
-                <td>{{ "%.1f"|format(file_info.health) }}</td>
-                <td><a href="/download/{{ file_hash }}"><button>Download</button></a></td>
-            </tr>
-            {% endfor %}
-        </table>
-        {% else %}
-        <p>No mods available yet. Be the first to upload one!</p>
-        {% endif %}
+    <div class="upload-section">
+        <h2>Upload a Mod</h2>
+        <form method="post" action="/upload" enctype="multipart/form-data">
+            <div>
+                <label>Mod File:</label>
+                <input type="file" name="file" required>
+            </div>
+            <div>
+                <label>Display Name:</label>
+                <input type="text" name="display_name" required>
+            </div>
+            <div>
+                <label>Game:</label>
+                <input type="text" name="game" required>
+            </div>
+            <div>
+                <label>Description:</label>
+                <textarea name="description" rows="3"></textarea>
+            </div>
+            <div>
+                <label>Update Password:</label>
+                <input type="password" name="password" required>
+                <small>You'll need this to update the mod later</small>
+            </div>
+            <button type="submit">Upload</button>
+        </form>
+        <p>Allowed formats: ZIP, RAR, 7Z, MOD, JAR</p>
     </div>
 
     <script>
