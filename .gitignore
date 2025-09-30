@@ -207,3 +207,4 @@ node_config.json
 node.db
 uploads/*
 database.db
+mod_network.db

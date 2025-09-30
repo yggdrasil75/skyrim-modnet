@@ -1,0 +1,238 @@
+<!-- templates/mod_detail.html -->
+{% extends "base.html" %}
+
+{% block title %}{{ mod.title }}{% endblock %}
+
+{% block content %}
+<div class="row">
+    <div class="col-md-8">
+        <nav aria-label="breadcrumb">
+            <ol class="breadcrumb">
+                <li class="breadcrumb-item"><a href="{{ url_for('mods_list') }}">Mods</a></li>
+                <li class="breadcrumb-item active">{{ mod.title }}</li>
+            </ol>
+        </nav>
+
+        <h1>{{ mod.title }}</h1>
+        
+        <div class="mb-3">
+            <span class="badge bg-primary">Version {{ mod.version }}</span>
+            {% if mod.game %}
+            <span class="badge bg-secondary">{{ mod.game.name }}</span>
+            {% endif %}
+            <span class="badge bg-light text-dark">{{ mod.created_at.strftime('%Y-%m-%d') }}</span>
+        </div>
+
+        <div class="card mb-4">
+            <div class="card-body">
+                <h5 class="card-title">Description</h5>
+                <p class="card-text">{{ mod.description or "No description provided." }}</p>
+            </div>
+        </div>
+
+        {% if mod_tags %}
+        <div class="card mb-4">
+            <div class="card-body">
+                <h5 class="card-title">Tags</h5>
+                <div class="d-flex flex-wrap gap-2">
+                    {% for mod_tag in mod_tags %}
+                        <span class="badge {% if mod_tag.vote_score > 0 %}bg-success{% elif mod_tag.vote_score < 0 %}bg-danger{% else %}bg-secondary{% endif %}">
+                            {{ mod_tag.tag.name }}
+                            {% if mod_tag.tag.category %}({{ mod_tag.tag.category }}){% endif %}
+                            <span class="ms-1">{{ mod_tag.vote_score }}</span>
+                        </span>
+                    {% endfor %}
+                </div>
+            </div>
+        </div>
+        {% endif %}
+
+        {% if files %}
+        <div class="card mb-4">
+            <div class="card-body">
+                <h5 class="card-title">Files</h5>
+                <div class="list-group">
+                    {% for file in files %}
+                    <div class="list-group-item">
+                        <div class="d-flex w-100 justify-content-between">
+                            <h6 class="mb-1">{{ file.filename }}</h6>
+                            <small>{{ (file.file_size / 1024 / 1024)|round(2) }} MB</small>
+                        </div>
+                        <p class="mb-1">
+                            <small class="text-muted">Hash: {{ file.file_hash }}</small><br>
+                            <small class="text-muted">Type: {{ file.file_type or 'Unknown' }}</small>
+                        </p>
+                        {% if file.has_textures or file.has_meshes or file.has_plugins %}
+                        <div class="mt-2">
+                            {% if file.has_textures %}<span class="badge bg-info me-1">Textures</span>{% endif %}
+                            {% if file.has_meshes %}<span class="badge bg-info me-1">Meshes</span>{% endif %}
+                            {% if file.has_plugins %}<span class="badge bg-info me-1">Plugins</span>{% endif %}
+                            {% if file.has_skse_plugins %}<span class="badge bg-warning me-1">SKSE</span>{% endif %}
+                            {% if file.has_scripts %}<span class="badge bg-warning me-1">Scripts</span>{% endif %}
+                        </div>
+                        {% endif %}
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+        </div>
+        {% endif %}
+    </div>
+
+    <div class="col-md-4">
+        <div class="card">
+            <div class="card-body">
+                <h5 class="card-title">Upload Information</h5>
+                <dl class="row">
+                    <dt class="col-sm-4">Uploader</dt>
+                    <dd class="col-sm-8">
+                        {% if mod.uploader %}
+                            <a href="{{ url_for('user_detail', node_id=mod.uploader.node_id) }}">
+                                {{ mod.uploader.display_name or mod.uploader.node_id }}
+                            </a>
+                        {% else %}
+                            Unknown
+                        {% endif %}
+                    </dd>
+                    
+                    <dt class="col-sm-4">Uploaded</dt>
+                    <dd class="col-sm-8">{{ mod.created_at.strftime('%Y-%m-%d %H:%M') }}</dd>
+                    
+                    <dt class="col-sm-4">Last Updated</dt>
+                    <dd class="col-sm-8">{{ mod.updated_at.strftime('%Y-%m-%d %H:%M') }}</dd>
+                    
+                    <dt class="col-sm-4">Mod ID</dt>
+                    <dd class="col-sm-8"><code>{{ mod.mod_id }}</code></dd>
+                </dl>
+                
+                <div class="d-grid gap-2">
+                    {% if files %}
+                        <a href="{{ url_for('download_mod', mod_id=mod.mod_id) }}" class="btn btn-success" id="downloadBtn">
+                            <i class="fas fa-download"></i> Download Mod ({{ (files[0].file_size / 1024 / 1024)|round(2) }} MB)
+                        </a>
+                        <small class="text-muted text-center">Click to download {{ files[0].filename }}</small>
+                    {% else %}
+                        <button class="btn btn-secondary" disabled>
+                            <i class="fas fa-download"></i> No Files Available
+                        </button>
+                    {% endif %}
+                </div>
+
+                <!-- Add loading indicator -->
+                <div id="downloadLoading" class="d-none text-center mt-2">
+                    <div class="spinner-border spinner-border-sm" role="status">
+                        <span class="visually-hidden">Downloading...</span>
+                    </div>
+                    <small class="text-muted ms-2">Preparing download...</small>
+                </div>
+            </div>
+        </div>
+
+        {% if similar_mods %}
+        <div class="card mt-4">
+            <div class="card-body">
+                <h5 class="card-title">Similar Mods</h5>
+                <div class="list-group list-group-flush">
+                    {% for similar_mod in similar_mods %}
+                    <a href="{{ url_for('mod_detail', mod_id=similar_mod.mod_id) }}" class="list-group-item list-group-item-action">
+                        <h6 class="mb-1">{{ similar_mod.title }}</h6>
+                        <small class="text-muted">Version {{ similar_mod.version }}</small>
+                    </a>
+                    {% endfor %}
+                </div>
+            </div>
+        </div>
+        {% endif %}
+    </div>
+</div>
+
+{% if downloads %}
+<div class="row mt-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-body">
+                <h5 class="card-title">Recent Downloads</h5>
+                <div class="table-responsive">
+                    <table class="table table-sm">
+                        <thead>
+                            <tr>
+                                <th>User</th>
+                                <th>Source Node</th>
+                                <th>Downloaded At</th>
+                                <th>Speed</th>
+                                <th>Status</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for download in downloads %}
+                            <tr>
+                                <td>
+                                    {% if download.user %}
+                                        {{ download.user.display_name or download.user.node_id }}
+                                    {% else %}
+                                        Unknown
+                                    {% endif %}
+                                </td>
+                                <td>
+                                    {% if download.source_node %}
+                                        {{ download.source_node.display_name or download.source_node.node_id }}
+                                    {% else %}
+                                        Unknown
+                                    {% endif %}
+                                </td>
+                                <td>{{ download.downloaded_at.strftime('%Y-%m-%d %H:%M') }}</td>
+                                <td>
+                                    {% if download.download_speed_mbps %}
+                                        {{ "%.2f"|format(download.download_speed_mbps) }} Mbps
+                                    {% else %}
+                                        N/A
+                                    {% endif %}
+                                </td>
+                                <td>
+                                    <span class="badge {% if download.success %}bg-success{% else %}bg-danger{% endif %}">
+                                        {{ "Success" if download.success else "Failed" }}
+                                    </span>
+                                </td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endif %}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const downloadBtn = document.getElementById('downloadBtn');
+    const downloadLoading = document.getElementById('downloadLoading');
+    
+    if (downloadBtn) {
+        downloadBtn.addEventListener('click', function(e) {
+            // Show loading indicator
+            downloadBtn.classList.add('d-none');
+            downloadLoading.classList.remove('d-none');
+            
+            // The download will start naturally via the link
+            // The loading indicator will disappear when the page reloads after download
+        });
+        
+        // Check download status on page load
+        fetch(`/api/download_status/{{ mod.mod_id }}`)
+            .then(response => response.json())
+            .then(data => {
+                if (!data.available) {
+                    downloadBtn.classList.add('btn-warning');
+                    downloadBtn.classList.remove('btn-success');
+                    downloadBtn.innerHTML = '<i class="fas fa-exclamation-triangle"></i> Download Unavailable';
+                    downloadBtn.title = data.reason || 'Download currently unavailable';
+                }
+            })
+            .catch(error => {
+                console.error('Error checking download status:', error);
+            });
+    }
+});
+</script>
+{% endblock %}

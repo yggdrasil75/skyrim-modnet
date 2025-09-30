@@ -1,0 +1,45 @@
+<!-- templates/games_list.html -->
+{% extends "base.html" %}
+
+{% block title %}Games{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <h1><i class="fas fa-gamepad"></i> Games</h1>
+    <div class="text-muted">{{ game_stats|length }} games in database</div>
+</div>
+
+<div class="row">
+    {% for stat in game_stats %}
+    <div class="col-md-6 col-lg-4 mb-4">
+        <div class="card mod-card">
+            <div class="card-body">
+                <h5 class="card-title">{{ stat.game.name }}</h5>
+                <h6 class="card-subtitle mb-2 text-muted">{{ stat.game.short_name }}</h6>
+                <p class="card-text">
+                    <span class="badge bg-primary">{{ stat.mod_count }} mods</span>
+                </p>
+                {% if stat.game.supported_versions %}
+                <p class="card-text">
+                    <small class="text-muted">
+                        Supported versions: {{ stat.game.supported_versions|join(', ') }}
+                    </small>
+                </p>
+                {% endif %}
+                <a href="{{ url_for('game_detail', game_id=stat.game.id) }}" class="btn btn-outline-primary btn-sm">
+                    View Details
+                </a>
+            </div>
+        </div>
+    </div>
+    {% endfor %}
+</div>
+
+{% if game_stats|length == 0 %}
+<div class="text-center py-5">
+    <i class="fas fa-gamepad fa-3x text-muted mb-3"></i>
+    <h3 class="text-muted">No Games Found</h3>
+    <p class="text-muted">No games have been added to the database yet.</p>
+</div>
+{% endif %}
+{% endblock %}

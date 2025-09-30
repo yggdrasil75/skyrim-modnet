@@ -1,0 +1,116 @@
+<!-- templates/mods_list.html -->
+{% extends "base.html" %}
+
+{% block title %}Mods{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <h1><i class="fas fa-cubes"></i> Mods</h1>
+    <a href="{{ url_for('upload_mod') }}" class="btn btn-primary">
+        <i class="fas fa-upload"></i> Upload Mod
+    </a>
+</div>
+
+<!-- Search and Filters -->
+<div class="card mb-4">
+    <div class="card-body">
+        <form method="GET" class="row g-3">
+            <div class="col-md-4">
+                <input type="text" class="form-control" name="search" placeholder="Search mods..." value="{{ search }}">
+            </div>
+            <div class="col-md-3">
+                <select class="form-select" name="game_id">
+                    <option value="all">All Games</option>
+                    {% for game in games %}
+                        <option value="{{ game.id }}" {% if selected_game == game.id|string %}selected{% endif %}>
+                            {{ game.name }}
+                        </option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-md-3">
+                <select class="form-select" name="tag_id">
+                    <option value="">All Tags</option>
+                    {% for tag in tags %}
+                        <option value="{{ tag.id }}" {% if selected_tag == tag.id|string %}selected{% endif %}>
+                            {{ tag.name }}{% if tag.category %} ({{ tag.category }}){% endif %}
+                        </option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div class="col-md-2">
+                <button type="submit" class="btn btn-outline-primary w-100">Filter</button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- Mods Grid -->
+<div class="row">
+    {% for mod in mods %}
+    <div class="col-md-6 col-lg-4 mb-4">
+        <div class="card mod-card">
+            <div class="card-body">
+                <h5 class="card-title">{{ mod.title }}</h5>
+                <h6 class="card-subtitle mb-2 text-muted">
+                    Version {{ mod.version }}
+                    {% if mod.game %}
+                    · {{ mod.game.name }}
+                    {% endif %}
+                </h6>
+                <p class="card-text">{{ mod.description[:150] }}{% if mod.description|length > 150 %}...{% endif %}</p>
+                
+                {% if mod.tags %}
+                <div class="mb-2">
+                    {% for mod_tag in mod.tags[:3] %}
+                        <span class="badge bg-secondary me-1">{{ mod_tag.tag.name }}</span>
+                    {% endfor %}
+                    {% if mod.tags|length > 3 %}
+                        <span class="badge bg-light text-dark">+{{ mod.tags|length - 3 }} more</span>
+                    {% endif %}
+                </div>
+                {% endif %}
+            </div>
+            <div class="card-footer">
+                <small class="text-muted">
+                    Uploaded {{ mod.created_at.strftime('%Y-%m-%d') }} by 
+                    {% if mod.uploader %}
+                        {{ mod.uploader.display_name or mod.uploader.node_id }}
+                    {% else %}
+                        Unknown
+                    {% endif %}
+                </small>
+                <a href="{{ url_for('mod_detail', mod_id=mod.mod_id) }}" class="btn btn-sm btn-outline-primary float-end">View Details</a>
+            </div>
+        </div>
+    </div>
+    {% else %}
+    <div class="col-12">
+        <div class="alert alert-info">
+            <i class="fas fa-info-circle"></i> No mods found matching your criteria.
+        </div>
+    </div>
+    {% endfor %}
+</div>
+
+<!-- Pagination -->
+{% if total_mods > per_page %}
+<nav aria-label="Mod pagination">
+    <ul class="pagination justify-content-center">
+        <li class="page-item {% if page == 1 %}disabled{% endif %}">
+            <a class="page-link" href="?page={{ page-1 }}&search={{ search }}&game_id={{ selected_game }}&tag_id={{ selected_tag }}">Previous</a>
+        </li>
+        
+        {% for p in range(1, (total_mods // per_page) + 2) %}
+            <li class="page-item {% if p == page %}active{% endif %}">
+                <a class="page-link" href="?page={{ p }}&search={{ search }}&game_id={{ selected_game }}&tag_id={{ selected_tag }}">{{ p }}</a>
+            </li>
+        {% endfor %}
+        
+        <li class="page-item {% if page * per_page >= total_mods %}disabled{% endif %}">
+            <a class="page-link" href="?page={{ page+1 }}&search={{ search }}&game_id={{ selected_game }}&tag_id={{ selected_tag }}">Next</a>
+        </li>
+    </ul>
+</nav>
+{% endif %}
+{% endblock %}

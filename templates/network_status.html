@@ -1,0 +1,168 @@
+<!-- templates/network_status.html -->
+{% extends "base.html" %}
+
+{% block title %}Network Status{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <h1><i class="fas fa-network-wired"></i> Network Status</h1>
+</div>
+
+<!-- Statistics Cards -->
+<div class="row mb-5">
+    <div class="col-md-3 mb-3">
+        <div class="card stats-card bg-primary text-white">
+            <div class="card-body text-center">
+                <h2><i class="fas fa-server"></i></h2>
+                <h3>{{ total_nodes }}</h3>
+                <p class="mb-0">Active Nodes</p>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3 mb-3">
+        <div class="card stats-card bg-success text-white">
+            <div class="card-body text-center">
+                <h2><i class="fas fa-link"></i></h2>
+                <h3>{{ total_connections }}</h3>
+                <p class="mb-0">Connections</p>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3 mb-3">
+        <div class="card stats-card bg-info text-white">
+            <div class="card-body text-center">
+                <h2><i class="fas fa-cubes"></i></h2>
+                <h3>{{ total_chunks }}</h3>
+                <p class="mb-0">File Chunks</p>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3 mb-3">
+        <div class="card stats-card bg-warning text-white">
+            <div class="card-body text-center">
+                <h2><i class="fas fa-hdd"></i></h2>
+                <h3>{{ total_hosting }}</h3>
+                <p class="mb-0">Hosting Records</p>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Storage Usage -->
+<div class="row mb-5">
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="card-title mb-0"><i class="fas fa-database"></i> Storage Usage</h5>
+            </div>
+            <div class="card-body">
+                <div class="mb-3">
+                    <div class="d-flex justify-content-between">
+                        <span>Used Storage:</span>
+                        <strong>{{ "%.2f"|format(total_used_storage) }} GB</strong>
+                    </div>
+                    <div class="d-flex justify-content-between">
+                        <span>Total Available:</span>
+                        <strong>{{ "%.2f"|format(total_storage_limit) }} GB</strong>
+                    </div>
+                </div>
+                <div class="progress" style="height: 20px;">
+                    {% set storage_percent = (total_used_storage / total_storage_limit * 100) if total_storage_limit > 0 else 0 %}
+                    <div class="progress-bar 
+                        {% if storage_percent > 90 %}bg-danger
+                        {% elif storage_percent > 75 %}bg-warning
+                        {% else %}bg-success{% endif %}" 
+                        role="progressbar" 
+                        style="width: {{ storage_percent }}%;" 
+                        aria-valuenow="{{ storage_percent }}" 
+                        aria-valuemin="0" 
+                        aria-valuemax="100">
+                        {{ "%.1f"|format(storage_percent) }}%
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row">
+    <div class="col-md-6 mb-4">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="card-title mb-0"><i class="fas fa-history"></i> Recent Downloads</h5>
+            </div>
+            <div class="card-body p-0">
+                <div class="list-group list-group-flush">
+                    {% for download in recent_downloads %}
+                    <div class="list-group-item">
+                        <div class="d-flex w-100 justify-content-between">
+                            <h6 class="mb-1">
+                                {% if download.success %}
+                                <i class="fas fa-check-circle text-success me-1"></i>
+                                {% else %}
+                                <i class="fas fa-times-circle text-danger me-1"></i>
+                                {% endif %}
+                                {{ download.mod.title }}
+                            </h6>
+                            <small>{{ download.downloaded_at.strftime('%H:%M') }}</small>
+                        </div>
+                        <p class="mb-1 small">
+                            Downloaded by {{ download.user.display_name or download.user.node_id }}
+                            {% if download.source_node %}
+                            from {{ download.source_node.display_name or download.source_node.node_id }}
+                            {% endif %}
+                        </p>
+                        {% if download.download_speed_mbps %}
+                        <small class="text-muted">{{ "%.2f"|format(download.download_speed_mbps) }} Mbps</small>
+                        {% endif %}
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Node Connections -->
+    <div class="col-md-6 mb-4">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="card-title mb-0"><i class="fas fa-project-diagram"></i> Recent Connections</h5>
+            </div>
+            <div class="card-body p-0">
+                <div class="list-group list-group-flush">
+                    {% for connection in connections %}
+                    <div class="list-group-item">
+                        <div class="d-flex w-100 justify-content-between">
+                            <h6 class="mb-1">
+                                {{ connection.from_node.display_name or connection.from_node.node_id }}
+                                <i class="fas fa-arrow-right mx-2"></i>
+                                {{ connection.to_node.display_name or connection.to_node.node_id }}
+                            </h6>
+                            <small>{{ connection.last_tested.strftime('%m/%d') }}</small>
+                        </div>
+                        <p class="mb-1 small">
+                            {% if connection.latency_ms %}
+                            <span class="badge bg-{{ 'success' if connection.latency_ms < 100 else 'warning' if connection.latency_ms < 500 else 'danger' }}">
+                                {{ "%.1f"|format(connection.latency_ms) }} ms
+                            </span>
+                            {% endif %}
+                            <span class="badge bg-{{ 'success' if connection.success_rate > 0.9 else 'warning' if connection.success_rate > 0.7 else 'danger' }}">
+                                {{ "%.1f"|format(connection.success_rate * 100) }}% success
+                            </span>
+                        </p>
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% if recent_downloads|length == 0 and connections|length == 0 %}
+<div class="text-center py-5">
+    <i class="fas fa-network-wired fa-3x text-muted mb-3"></i>
+    <h3 class="text-muted">No Network Activity</h3>
+    <p class="text-muted">No recent downloads or connections to display.</p>
+</div>
+{% endif %}
+{% endblock %}
