@@ -465,6 +465,54 @@ def api_stats():
     session.close()
     return jsonify(stats)
 
+@app.route('/api/add_node', methods=['POST'])
+def api_add_node():
+    """API endpoint to manually add a remote node"""
+    session = get_db_session()
+    
+    try:
+        data = request.get_json()
+        node_url = data.get('node_url', '').strip()
+        
+        if not node_url:
+            return jsonify({'success': False, 'message': 'Node URL is required'})
+        
+        # Validate URL format
+        if not (node_url.startswith('http://') or node_url.startswith('https://')):
+            return jsonify({'success': False, 'message': 'URL must start with http:// or https://'})
+        
+        # Create node instance
+        node = create_node_instance()
+        
+        # Run the async node addition
+        def run_add_node():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                return loop.run_until_complete(
+                    node.add_remote_node(node_url)
+                )
+            finally:
+                loop.close()
+        
+        # Run in thread with timeout
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            future = executor.submit(run_add_node)
+            result = future.result(timeout=30)  # 30 second timeout
+        
+        if result:
+            flash(f'Successfully added node: {node_url}', 'success')
+            return jsonify({'success': True, 'message': f'Node {node_url} added successfully'})
+        else:
+            return jsonify({'success': False, 'message': f'Failed to add node {node_url}'})
+            
+    except concurrent.futures.TimeoutError:
+        return jsonify({'success': False, 'message': 'Connection timed out'})
+    except Exception as e:
+        return jsonify({'success': False, 'message': f'Error adding node: {str(e)}'})
+    finally:
+        session.close()
+
 @app.route('/api/recent_activity')
 def api_recent_activity():
     """JSON API for recent activity"""
@@ -622,6 +670,36 @@ def create_node_instance():
         display_name=NODE_CONFIG['display_name']
     )
     return node
+
+async def add_remote_node(self, node_url: str) -> bool:
+    """
+    Manually add a remote node to the network
+    """
+    try:
+        # Extract host and port from URL
+        from urllib.parse import urlparse
+        parsed = urlparse(node_url)
+        host = parsed.hostname
+        port = parsed.port or (443 if parsed.scheme == 'https' else 80)
+        
+        # Add to known nodes (you'll need to implement this in your node logic)
+        # This is a simplified example - adapt to your actual node implementation
+        node_info = {
+            'node_id': f"manual_{host}_{port}",
+            'base_url': node_url,
+            'host': host,
+            'port': port,
+            'is_https': parsed.scheme == 'https'
+        }
+        
+        # Store in database or node configuration
+        # You'll need to implement the actual storage logic based on your architecture
+        logger.info(f"Added manual node: {node_url}")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Error adding remote node {node_url}: {e}")
+        return False
 
 @app.errorhandler(413)
 def too_large(e):

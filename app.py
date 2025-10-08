@@ -406,7 +406,7 @@ class NodeServer:
             'chunks_available': len(self.node.get_available_chunks()),
             'stats': self.node.stats
         }
-        return aiohttp.web.json_response(health_info)
+        return web.json_response(health_info)
     
     async def handle_node_registration(self, request):
         data = await request.json()
