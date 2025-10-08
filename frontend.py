@@ -672,36 +672,6 @@ def create_node_instance():
     )
     return node
 
-async def add_remote_node(self, node_url: str) -> bool:
-    """
-    Manually add a remote node to the network
-    """
-    try:
-        # Extract host and port from URL
-        from urllib.parse import urlparse
-        parsed = urlparse(node_url)
-        host = parsed.hostname
-        port = parsed.port or (443 if parsed.scheme == 'https' else 80)
-        
-        # Add to known nodes (you'll need to implement this in your node logic)
-        # This is a simplified example - adapt to your actual node implementation
-        node_info = {
-            'node_id': f"manual_{host}_{port}",
-            'base_url': node_url,
-            'host': host,
-            'port': port,
-            'is_https': parsed.scheme == 'https'
-        }
-        
-        # Store in database or node configuration
-        # You'll need to implement the actual storage logic based on your architecture
-        logger.info(f"Added manual node: {node_url}")
-        return True
-        
-    except Exception as e:
-        logger.error(f"Error adding remote node {node_url}: {e}")
-        return False
-
 @app.errorhandler(413)
 def too_large(e):
     return jsonify({'success': False, 'message': 'File too large (max 2GB)'}), 413
