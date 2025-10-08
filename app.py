@@ -11,6 +11,7 @@ from sqlalchemy import create_engine, and_, or_
 from sqlalchemy.orm import sessionmaker
 import logging
 from datetime import datetime
+from node_config import NODE_CONFIG
 
 # Import your existing database models
 from database import Base, User, Mod, ModFile, FileChunk, ChunkHosting, Friendship, NodeConnection, Game
@@ -465,11 +466,11 @@ class NodeServer:
 async def main():
     # Initialize a node
     node = ModNetworkNode(
-        db_path='sqlite:///mod_network.db',
-        storage_path='./uploads',
-        node_id='node_123456',
-        public_key='public_key_here',
-        display_name='My Mod Node'
+        db_path=NODE_CONFIG['db_path'],
+        storage_path=NODE_CONFIG['storage_path'],
+        node_id=NODE_CONFIG['node_id'],
+        public_key=NODE_CONFIG['public_key'],
+        display_name=NODE_CONFIG['display_name']
     )
     
     # Add some known nodes
