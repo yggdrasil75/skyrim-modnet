@@ -1,0 +1,225 @@
+{% extends "base.html" %}
+{% block title %}{{ mod.name }} — DistMod{% endblock %}
+
+{% block content %}
+<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:1rem;flex-wrap:wrap">
+  <div>
+    <div class="eyebrow">{{ mod.category or 'mod' }}{% if mod.games %} · {{ mod.games|join(', ') }}{% endif %}</div>
+    <h1 style="font-size:1.7rem;margin-bottom:.2rem">{{ mod.name }}</h1>
+    <div class="by mono small muted">v{{ mod.version }} · author {{ mod.author_pubkey[:16] }}…</div>
+  </div>
+  <div style="text-align:right">
+    {% if rating.score is not none %}
+      {% set full, half, empty = stars %}
+      <span class="stars" aria-label="rating {{ rating.score }} of 5">
+        {%- for _ in range(full) %}★{% endfor -%}
+        {%- if half %}⯨{% endif -%}
+        {%- for _ in range(empty) %}<span class="empty">★</span>{% endfor -%}
+      </span>
+      <div class="small muted mono">{{ rating.score }} · {{ rating.raw_votes }} vote{{ 's' if rating.raw_votes!=1 }}
+        {% if rating.burst_damping < 0.9 %} · <span style="color:var(--lowweight)">burst-damped</span>{% endif %}
+      </div>
+    {% else %}<span class="muted small">unrated</span>{% endif %}
+  </div>
+</div>
+
+<p style="max-width:70ch;margin:1rem 0 1.25rem">{{ mod.description or "No description provided." }}</p>
+
+<!-- availability / download -->
+<section class="panel" style="margin-bottom:1rem">
+  <div style="display:flex;justify-content:space-between;align-items:center;gap:1rem;flex-wrap:wrap">
+    <div>
+      <div class="eyebrow">network availability</div>
+      <span class="chip {{ 'available' if downloadable_now else 'insufficient' }}">
+        {{ avail.available }}/{{ avail.total }} shards agreed
+      </span>
+      <span class="muted small" style="margin-left:.5rem">
+        a file downloads only when enough nodes vote that its bytes match
+      </span>
+    </div>
+    <button class="btn" id="dlBtn" data-mod="{{ mod.id }}"
+            {{ 'disabled' if not downloadable_now }}>
+      {{ 'Download' if downloadable_now else 'Not yet available' }}
+    </button>
+  </div>
+</section>
+
+<div class="grid cols-2">
+  <!-- left column -->
+  <div class="grid" style="gap:1rem">
+    {% if downloadables %}
+    <section class="panel">
+      <div class="eyebrow">downloads</div>
+      {% for d in downloadables %}
+      <div style="margin-bottom:.8rem">
+        <strong>{{ d.name }}</strong> <span class="chip">{{ d.kind }}</span>
+        {% if d.description %}<div class="small muted">{{ d.description }}</div>{% endif %}
+        {% if d.content_list %}
+        <details style="margin-top:.3rem">
+          <summary class="small muted" style="cursor:pointer">{{ d.content_list|length }} files</summary>
+          <ul class="mono small" style="margin:.4rem 0 0;padding-left:1.1rem;color:var(--dim)">
+            {% for f in d.content_list %}<li>{{ f }}</li>{% endfor %}
+          </ul>
+        </details>
+        {% endif %}
+      </div>
+      {% endfor %}
+    </section>
+    {% endif %}
+
+    {% if compat %}
+    <section class="panel">
+      <div class="eyebrow">game-version compatibility</div>
+      <table class="matrix">
+        <thead><tr><th>Game</th><th>Version</th><th>Status</th><th>Note</th></tr></thead>
+        <tbody>
+        {% for c in compat %}
+          <tr>
+            <td>{{ c.game }}</td>
+            <td class="ver">{{ c.game_version }}</td>
+            <td><span class="chip {{ c.status }}">{{ c.status }}</span></td>
+            <td class="small muted">{{ c.note or '' }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </section>
+    {% endif %}
+
+    {% if translations %}
+    <section class="panel">
+      <div class="eyebrow">translations</div>
+      <div class="tagrow">
+        {% for t in translations %}<span class="chip">{{ t.language }}</span>{% endfor %}
+      </div>
+    </section>
+    {% endif %}
+  </div>
+
+  <!-- right column -->
+  <div class="grid" style="gap:1rem">
+    <!-- content intensity -->
+    <section class="panel">
+      <div class="eyebrow">content intensity</div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin:.3rem 0">
+        <span class="small">Sexual</span>
+        <span class="meter" aria-label="sexual intensity {{ sexual.displayed }} of 5">
+          {% for i in range(5) %}<span class="seg {{ 'on' if i < sexual.displayed|round(0,'floor')|int }}"></span>{% endfor %}
+        </span>
+      </div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin:.3rem 0">
+        <span class="small">Violent</span>
+        <span class="meter violent" aria-label="violent intensity {{ violent.displayed }} of 5">
+          {% for i in range(5) %}<span class="seg {{ 'on' if i < violent.displayed|round(0,'floor')|int }}"></span>{% endfor %}
+        </span>
+      </div>
+      <div class="small muted" style="margin-top:.4rem">0 = none · 5 = focus.
+        Author baseline, adjusted by community votes.</div>
+    </section>
+
+    <!-- tags with voting -->
+    <section class="panel">
+      <div class="eyebrow">tags · community voted</div>
+      <div class="tagrow" style="margin-bottom:.7rem">
+        {% for t in tags %}
+          <span class="chip {{ t.state }} {{ t.tag_class }}" title="{{ t.state }} · class: {{ t.tag_class }}">
+            {{ t.tag }}{% if t.tag_class == 'focus' %} ★{% endif %}
+          </span>
+        {% else %}
+          <span class="muted small">No tags yet — add one below.</span>
+        {% endfor %}
+      </div>
+      <details>
+        <summary class="small" style="cursor:pointer;color:var(--signal)">Propose or vote a tag</summary>
+        <div style="margin-top:.6rem;display:grid;gap:.5rem">
+          <input id="tagName" placeholder="tag (e.g. stormcloak)">
+          <select id="tagClass">
+            <option value="focus">focus — the point of the mod</option>
+            <option value="contains" selected>contains — present in it</option>
+            <option value="minor">minor — optional / can be disabled</option>
+          </select>
+          <div style="display:flex;gap:.5rem">
+            <button class="btn" data-vote="1" data-mod="{{ mod.id }}" onclick="voteTag(this)">Support</button>
+            <button class="btn ghost" data-vote="-1" data-mod="{{ mod.id }}" onclick="voteTag(this)">Oppose</button>
+          </div>
+        </div>
+      </details>
+    </section>
+
+    <!-- rate -->
+    <section class="panel">
+      <div class="eyebrow">rate this mod</div>
+      <div id="rateStars" style="font-size:1.5rem;color:var(--dimmer);cursor:pointer;user-select:none">
+        {% for i in range(1,6) %}<span data-score="{{ i }}" onmouseover="hoverStar({{ i }})"
+          onmouseout="hoverStar(0)" onclick="submitRate({{ i }},'{{ mod.id }}')">★</span>{% endfor %}
+      </div>
+      <div class="small muted" style="margin-top:.4rem">
+        Your vote is weighted by your standing and calibrated against your own
+        history — and review-bomb bursts are damped.
+      </div>
+    </section>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const D = window.distmod;
+
+// download: fetch shard list, then each shard (gated by consensus), reassemble
+document.getElementById("dlBtn")?.addEventListener("click", async (e) => {
+  const modId = e.target.dataset.mod;
+  e.target.disabled = true; e.target.textContent = "Fetching…";
+  try {
+    const info = await (await fetch(`/api/mods/${modId}`)).json();
+    const shards = (info.shards || []).sort((a,b)=>a.seq-b.seq);
+    if (!shards.length) throw new Error("no shards");
+    const parts = [];
+    for (const s of shards) {
+      const r = await fetch(`/api/mods/shard/${s.id}`);
+      if (!r.ok) {
+        const j = await r.json().catch(()=>({}));
+        throw new Error(j.consensus ? `shard ${s.seq} ${j.consensus}` : `shard ${s.seq} unavailable`);
+      }
+      parts.push(await r.blob());
+    }
+    const blob = new Blob(parts, {type:"application/octet-stream"});
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `${info.mod.name.replace(/\s+/g,'_')}.7z`;
+    a.click();
+    D.toast("Download assembled from the network.");
+    e.target.textContent = "Download";
+  } catch (err) {
+    D.toast("Couldn't download: " + err.message, true);
+    e.target.textContent = "Download";
+  } finally { e.target.disabled = false; }
+});
+
+async function voteTag(btn) {
+  const tag = document.getElementById("tagName").value.trim();
+  if (!tag) return D.toast("Enter a tag first.", true);
+  const cls = document.getElementById("tagClass").value;
+  const auth = await D.authParams();
+  const body = new URLSearchParams({...auth, tag, vote: btn.dataset.vote, class_vote: cls});
+  const r = await fetch(`/api/meta/${btn.dataset.mod}/tag-vote`, {method:"POST", body});
+  const j = await r.json();
+  if (j.ok) { D.toast(`Tag "${tag}" → ${j.tag.state}.`); setTimeout(()=>location.reload(), 800); }
+  else D.toast(j.error || "Vote failed.", true);
+}
+
+function hoverStar(n) {
+  document.querySelectorAll("#rateStars span").forEach(s => {
+    s.style.color = (n && +s.dataset.score <= n) ? "var(--signal)" : "var(--dimmer)";
+  });
+}
+async function submitRate(score, modId) {
+  const auth = await D.authParams();
+  const body = new URLSearchParams({...auth, score});
+  const r = await fetch(`/api/meta/${modId}/rate`, {method:"POST", body});
+  const j = await r.json();
+  if (j.ok) { D.toast(`Rated ${score}★. Thanks.`); setTimeout(()=>location.reload(), 800); }
+  else D.toast(j.error || "Rating failed.", true);
+}
+</script>
+{% endblock %}

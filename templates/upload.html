@@ -1,0 +1,140 @@
+{% extends "base.html" %}
+{% block title %}Publish — DistMod{% endblock %}
+
+{% block content %}
+<div class="eyebrow">publish</div>
+<h1 style="font-size:1.5rem">Publish a mod</h1>
+<p class="muted" style="max-width:65ch">
+  Your files are checked for executables, compressed, split into shards, and
+  handed to the network. Only your key can edit this mod later — keep it safe.
+</p>
+
+<section class="panel" style="margin-top:1rem">
+  <div class="field">
+    <label>Mod folder (select all files from your mod's folder)</label>
+    <input type="file" id="files" webkitdirectory directory multiple>
+    <div class="small muted" id="fileSummary" style="margin-top:.3rem"></div>
+  </div>
+  <div class="grid cols-2">
+    <div class="field"><label>Name</label><input id="name" placeholder="Cool Armor Pack"></div>
+    <div class="field"><label>Version</label><input id="version" value="1.0" ></div>
+  </div>
+  <div class="grid cols-2">
+    <div class="field"><label>Category (you set this)</label>
+      <input id="category" list="cats" placeholder="armor">
+      <datalist id="cats">{% for c in categories %}<option value="{{ c }}">{% endfor %}</datalist>
+    </div>
+    <div class="field"><label>Games (comma separated)</label>
+      <input id="games" placeholder="skyrim, skyrim-se"></div>
+  </div>
+  <div class="field"><label>Description</label>
+    <textarea id="description" rows="3" placeholder="What does this mod do?"></textarea></div>
+  <div class="grid cols-2">
+    <div class="field"><label>Sexual content (0 none – 5 focus)</label>
+      <input type="number" id="sexual" min="0" max="5" value="0"></div>
+    <div class="field"><label>Violent content (0 none – 5 focus)</label>
+      <input type="number" id="violent" min="0" max="5" value="0"></div>
+  </div>
+
+  <div style="display:flex;gap:.6rem;align-items:center">
+    <button class="btn" id="publishBtn">Publish to network</button>
+    <span class="small muted" id="pubStatus"></span>
+  </div>
+</section>
+
+<section class="panel" style="margin-top:1rem">
+  <div class="eyebrow">your key</div>
+  <p class="small muted">This device holds your signing key. Back it up to keep
+    control of your mods if you switch machines.</p>
+  <div style="display:flex;gap:.6rem;flex-wrap:wrap">
+    <button class="btn ghost" id="showKey">Show / export key</button>
+    <button class="btn ghost" id="importKey">Import a key</button>
+  </div>
+  <pre class="mono small" id="keyOut" style="margin-top:.6rem;white-space:pre-wrap;color:var(--dim)"></pre>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<!-- JSZip for client-side folder bundling -->
+<script src="{{ url_for('static', filename='js/jszip.min.js') }}"></script>
+<script>
+const D = window.distmod;
+let picked = [];
+
+document.getElementById("files").addEventListener("change", (e) => {
+  picked = [...e.target.files];
+  const bytes = picked.reduce((n,f)=>n+f.size,0);
+  document.getElementById("fileSummary").textContent =
+    `${picked.length} files · ${(bytes/1048576).toFixed(1)} MB`;
+});
+
+document.getElementById("publishBtn").addEventListener("click", async () => {
+  const name = document.getElementById("name").value.trim();
+  if (!name) return D.toast("Give your mod a name.", true);
+  if (!picked.length) return D.toast("Select your mod's folder.", true);
+  if (typeof JSZip === "undefined")
+    return D.toast("Bundling library missing — see jszip note.", true);
+
+  const status = document.getElementById("pubStatus");
+  status.textContent = "Bundling…";
+  try {
+    const zip = new JSZip();
+    for (const f of picked) {
+      const rel = f.webkitRelativePath || f.name;
+      zip.file(rel.split("/").slice(1).join("/") || f.name, f);
+    }
+    const blob = await zip.generateAsync({type:"blob"});
+
+    status.textContent = "Signing…";
+    const auth = await D.authParams();
+    const games = document.getElementById("games").value
+      .split(",").map(s=>s.trim()).filter(Boolean);
+    const meta = {
+      name, version: document.getElementById("version").value || "1.0",
+      description: document.getElementById("description").value,
+      category: document.getElementById("category").value.trim() || "misc",
+    };
+    const fd = new FormData();
+    Object.entries(auth).forEach(([k,v])=>fd.append(k,v));
+    fd.append("meta", JSON.stringify(meta));
+    fd.append("bundle", blob, "bundle.zip");
+
+    status.textContent = "Uploading…";
+    const r = await fetch("/api/mods/publish", {method:"POST", body:fd});
+    const j = await r.json();
+    if (!j.ok) {
+      if (j.violations) D.toast("Rejected: executable files found.", true);
+      else D.toast(j.error || "Publish failed.", true);
+      status.textContent = "";
+      return;
+    }
+    // set the extra metadata (category/games/flags) now that the mod exists
+    const auth2 = await D.authParams();
+    const fd2 = new URLSearchParams({...auth2, meta: JSON.stringify({
+      category: meta.category, games,
+      sexual_flag: +document.getElementById("sexual").value,
+      violent_flag: +document.getElementById("violent").value })});
+    await fetch(`/api/meta/${j.mod_id}/metadata`, {method:"POST", body:fd2});
+
+    D.toast("Published! Redirecting…");
+    setTimeout(()=>location.href = `/mod/${j.mod_id}`, 900);
+  } catch (err) {
+    D.toast("Publish error: " + err.message, true);
+    status.textContent = "";
+  }
+});
+
+document.getElementById("showKey").onclick = async () => {
+  await D.ensureIdentity();
+  const k = D.exportKey();
+  document.getElementById("keyOut").textContent =
+    `PUBLIC (share):\n${k.public}\n\nPRIVATE (keep secret, back up!):\n${k.secret}`;
+};
+document.getElementById("importKey").onclick = () => {
+  const sk = prompt("Paste your private key (hex):");
+  if (!sk) return;
+  try { const pub = D.importKey(sk); D.toast("Key imported: " + pub.slice(0,12) + "…"); }
+  catch { D.toast("That key didn't parse.", true); }
+};
+</script>
+{% endblock %}

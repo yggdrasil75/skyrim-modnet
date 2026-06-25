@@ -1,0 +1,21 @@
+{% macro stars(parts) %}
+  {%- set full, half, empty = parts -%}
+  <span class="stars" aria-label="rating">
+    {%- for _ in range(full) %}★{% endfor -%}
+    {%- if half %}⯨{% endif -%}
+    {%- for _ in range(empty) %}<span class="empty">★</span>{% endfor -%}
+  </span>
+{% endmacro %}
+
+{% macro modcard(m) %}
+  <a class="modcard" href="{{ url_for('pages.mod_page', mod_id=m.id) }}">
+    <div class="name">{{ m.name }}</div>
+    <div class="by">by {{ m.author_pubkey[:10] }}…{% if m.games %} · {{ m.games|join(', ') }}{% endif %}</div>
+    <div class="desc">{{ m.description or "No description provided." }}</div>
+    <div class="foot">
+      {% if m.score is not none %}{{ stars(m.star_parts) }}{% else %}<span class="muted small">unrated</span>{% endif %}
+      {% if m.category %}<span class="chip">{{ m.category }}</span>{% endif %}
+      {% for t in m.tag_list %}<span class="chip">{{ t }}</span>{% endfor %}
+    </div>
+  </a>
+{% endmacro %}

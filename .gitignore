@@ -208,3 +208,5 @@ node.db
 uploads/*
 database.db
 mod_network.db
+node_storage
+node_data/

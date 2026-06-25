@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% from "partials/macros.html" import modcard %}
+{% block title %}DistMod — distributed mod network{% endblock %}
+
+{% block content %}
+<section class="panel" style="margin-bottom:1.5rem;overflow:hidden;position:relative">
+  <div class="eyebrow">no owner · no central moderator · no single jurisdiction</div>
+  <h1 style="font-size:1.9rem;max-width:30ch">
+    Mods that don't disappear when one server, company, or country does.
+  </h1>
+  <p class="muted" style="max-width:60ch">
+    Every file lives on many independent nodes that vote on what's authentic
+    and replicate copies far apart on purpose. You're viewing one node of the
+    network right now.
+  </p>
+  <div style="display:flex;gap:.6rem;margin-top:1rem;flex-wrap:wrap">
+    <a class="btn" href="{{ url_for('pages.browse') }}">Browse mods</a>
+    <a class="btn ghost" href="{{ url_for('pages.upload') }}">Publish a mod</a>
+    <a class="btn ghost" href="{{ url_for('pages.status') }}">Node status</a>
+  </div>
+
+  <div class="grid cols-3" style="margin-top:1.5rem">
+    <div><div class="eyebrow">indexed mods</div>
+      <div class="mono" style="font-size:1.6rem;color:var(--signal)">{{ mod_count }}</div></div>
+    <div><div class="eyebrow">known peers</div>
+      <div class="mono" style="font-size:1.6rem;color:var(--verified)">{{ peer_count }}</div></div>
+    <div><div class="eyebrow">this node</div>
+      <div class="mono" style="font-size:1.05rem;margin-top:.4rem">{{ node_role }} · {{ node_id[:12] }}</div></div>
+  </div>
+</section>
+
+{% if recent %}
+<div class="eyebrow">recently updated</div>
+<div class="cardgrid" style="margin-bottom:1.75rem">
+  {% for m in recent %}{{ modcard(m) }}{% endfor %}
+</div>
+{% endif %}
+
+{% if games %}
+<div class="eyebrow">games on this node</div>
+<div class="tagrow">
+  {% for g in games %}
+    <a class="chip" href="{{ url_for('pages.game_page', game=g.name) }}">{{ g.name }} · {{ g.count }}</a>
+  {% endfor %}
+</div>
+{% endif %}
+{% endblock %}

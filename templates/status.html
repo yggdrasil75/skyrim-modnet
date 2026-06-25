@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+{% block title %}Node status — DistMod{% endblock %}
+
+{% block content %}
+<div class="eyebrow">node console</div>
+<h1 style="font-size:1.5rem">This node</h1>
+<dl class="kv panel" style="margin:1rem 0">
+  <dt>node id</dt><dd class="mono">{{ node_id }}</dd>
+  <dt>role</dt><dd><span class="chip">{{ node_role }}</span></dd>
+  <dt>public url</dt><dd class="mono">{{ public_url }}</dd>
+  <dt>replica target</dt><dd>{{ target }} copies per shard</dd>
+</dl>
+
+<div class="grid cols-3" style="margin-bottom:1rem">
+  <div class="panel"><div class="eyebrow">mods indexed</div>
+    <div class="mono" style="font-size:1.5rem">{{ counts.mods }}</div></div>
+  <div class="panel"><div class="eyebrow">shards held / known</div>
+    <div class="mono" style="font-size:1.5rem">{{ counts.held }} / {{ counts.shards }}</div></div>
+  <div class="panel"><div class="eyebrow">local storage</div>
+    <div class="mono" style="font-size:1.5rem">{{ (storage/1048576)|round(1) }} MB</div></div>
+  <div class="panel"><div class="eyebrow">known peers</div>
+    <div class="mono" style="font-size:1.5rem">{{ counts.peers }}</div></div>
+  <div class="panel"><div class="eyebrow">registered users</div>
+    <div class="mono" style="font-size:1.5rem">{{ counts.users }}</div></div>
+  <div class="panel"><div class="eyebrow">under-replicated</div>
+    <div class="mono" style="font-size:1.5rem;color:{{ 'var(--contest)' if rare else 'var(--verified)' }}">{{ rare }}</div></div>
+</div>
+
+<section class="panel">
+  <div class="eyebrow">peers</div>
+  {% if peers %}
+  <table class="matrix">
+    <thead><tr><th>Node</th><th>State</th><th>Relation</th><th>Distance</th>
+      <th>Reputation</th><th>Seen</th></tr></thead>
+    <tbody>
+    {% for p in peers %}
+      <tr>
+        <td class="mono small">{{ p.node_id[:14] }}…</td>
+        <td><span class="chip {{ p.node_state }}">{{ p.node_state }}</span></td>
+        <td><span class="chip {{ p.relation }}">{{ p.relation }}</span></td>
+        <td class="mono small">{{ (p.distance_ms|round(0))|int if p.distance_ms else '—' }}{{ ' ms' if p.distance_ms }}</td>
+        <td class="mono small">
+          <span style="color:var(--verified)">{{ p.good_votes }}↑</span>
+          <span style="color:var(--contest)">{{ p.bad_votes }}↓</span>
+        </td>
+        <td class="small muted">{{ ((now - p.last_seen)//60) if p.last_seen else '?' }}{{ 'm ago' if p.last_seen }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">No peers yet. This node is running solo until it meets others.</p>
+  {% endif %}
+</section>
+
+<section class="panel" style="margin-top:1rem">
+  <div class="eyebrow">manage peers</div>
+  <p class="small muted">Mark a peer to change how this node treats it. Friends are
+    preferred for downloads; enemies are never replicated to or from.</p>
+  <div style="display:grid;gap:.5rem;grid-template-columns:2fr 1fr auto;align-items:end">
+    <div><label>Peer node id</label><input id="relNode" placeholder="node id"></div>
+    <div><label>Relation</label>
+      <select id="relValue">
+        <option>friend</option><option selected>neutral</option>
+        <option>distant</option><option>neighbor</option><option>enemy</option>
+      </select></div>
+    <button class="btn" onclick="setRelation()">Set</button>
+  </div>
+</section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// inject "now" for relative times without a server round-trip
+const now = {{ now_ts }};
+async function setRelation() {
+  const node = document.getElementById("relNode").value.trim();
+  const relation = document.getElementById("relValue").value;
+  if (!node) return window.distmod.toast("Enter a node id.", true);
+  const r = await fetch(`/api/net/relation/${node}`, {
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({relation})});
+  const j = await r.json();
+  window.distmod.toast(j.ok ? `Set ${node.slice(0,10)}… → ${relation}.`
+                            : (j.error||"Failed."), !j.ok);
+  if (j.ok) setTimeout(()=>location.reload(), 800);
+}
+</script>
+{% endblock %}

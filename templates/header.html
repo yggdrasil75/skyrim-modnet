@@ -1,0 +1,16 @@
+<header class="topbar">
+  <div class="brand">
+    <a href="{{ url_for('pages.home') }}" class="logo">dist<b>mod</b></a>
+    <span class="tag">distributed mods</span>
+  </div>
+  <nav class="topnav">
+    <a href="{{ url_for('pages.browse') }}" class="{{ 'active' if active=='browse' }}">Browse</a>
+    <a href="{{ url_for('pages.games') }}" class="{{ 'active' if active=='games' }}">Games</a>
+    <a href="{{ url_for('pages.upload') }}" class="{{ 'active' if active=='upload' }}">Upload</a>
+    <a href="{{ url_for('pages.status') }}" class="{{ 'active' if active=='status' }}">Node</a>
+    <span class="node-pip" title="This node's role and id">
+      <span class="dot"></span>
+      <span class="mono">{{ node_role|default('common') }} · {{ node_id[:8] }}</span>
+    </span>
+  </nav>
+</header>

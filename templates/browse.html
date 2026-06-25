@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% from "partials/macros.html" import modcard %}
+{% block title %}Browse — DistMod{% endblock %}
+
+{% block content %}
+<div class="eyebrow">browse</div>
+<h1 style="font-size:1.5rem">Find a mod</h1>
+
+<form class="panel" method="get" action="{{ url_for('pages.browse') }}"
+      style="margin:1rem 0 1.5rem;display:grid;gap:.8rem;grid-template-columns:2fr 1fr 1fr auto;align-items:end">
+  <div><label>Search</label>
+    <input name="q" value="{{ q }}" placeholder="name or description"></div>
+  <div><label>Category</label>
+    <select name="category">
+      <option value="">all</option>
+      {% for c in categories %}
+        <option value="{{ c }}" {{ 'selected' if c==category }}>{{ c }}</option>
+      {% endfor %}
+    </select></div>
+  <div><label>Sort</label>
+    <select name="sort">
+      <option value="recent" {{ 'selected' if sort=='recent' }}>recently updated</option>
+      <option value="name" {{ 'selected' if sort=='name' }}>name</option>
+    </select></div>
+  <button class="btn" type="submit">Apply</button>
+</form>
+
+{% if cards %}
+<div class="cardgrid">
+  {% for m in cards %}{{ modcard(m) }}{% endfor %}
+</div>
+{% else %}
+<div class="panel muted">
+  No mods match those filters yet. Try clearing the search, or
+  <a href="{{ url_for('pages.upload') }}">publish the first one</a>.
+</div>
+{% endif %}
+{% endblock %}
